@@ -233,29 +233,47 @@ class TestIssueAliases:
         assert d_short["type"] == d_alias["type"]
 
     def test_release_release_claim_parity(self, cli_in_project: tuple[CliRunner, Path]) -> None:
-        """release and release-claim produce the same error envelope on unclaimed issue."""
+        """release and release-claim produce the same envelopes: the no-op on an
+        unclaimed issue and the holder-check CONFLICT on a peer's claim."""
         runner, _ = cli_in_project
         id1 = _create_issue(runner, "Release short form")
         id2 = _create_issue(runner, "Release alias form")
-        # Releasing an unclaimed issue yields a CONFLICT error — both forms should match structurally
-        out_short = runner.invoke(cli, ["release", id1, "--json"])
-        out_alias = runner.invoke(cli, ["release-claim", id2, "--json"])
-        assert out_short.exit_code == out_alias.exit_code
+        out_short = runner.invoke(cli, ["--actor", "agent-1", "release", id1, "--json"])
+        out_alias = runner.invoke(cli, ["--actor", "agent-1", "release-claim", id2, "--json"])
+        assert out_short.exit_code == out_alias.exit_code == 0
+        assert json.loads(out_short.output) == json.loads(out_alias.output) == {"result": "no_op", "reason": "not_claimed"}
+
+        runner.invoke(cli, ["claim", id1, "--assignee", "agent-2"])
+        runner.invoke(cli, ["claim", id2, "--assignee", "agent-2"])
+        out_short = runner.invoke(cli, ["--actor", "agent-1", "release", id1, "--json"])
+        out_alias = runner.invoke(cli, ["--actor", "agent-1", "release-claim", id2, "--json"])
+        assert out_short.exit_code == out_alias.exit_code == 1
         d_short = json.loads(out_short.output)
         d_alias = json.loads(out_alias.output)
-        assert d_short.get("code") == d_alias.get("code")
+        assert d_short["code"] == d_alias["code"] == "CONFLICT"
+        assert set(d_short["details"]) == set(d_alias["details"])
 
     def test_undo_undo_last_parity(self, cli_in_project: tuple[CliRunner, Path]) -> None:
-        """undo and undo-last produce identical JSON structure on a fresh issue."""
+        """undo and undo-last share --expected-event-id semantics: the no-op on a
+        fresh issue, CONFLICT on a stale event id, success on the right one."""
         runner, _ = cli_in_project
         id1 = _create_issue(runner, "Undo short form")
         id2 = _create_issue(runner, "Undo alias form")
-        # Undo on a newly-created issue with no reversible event → both should
-        # fail with the same structure.
-        out_short = runner.invoke(cli, ["undo", id1, "--json"])
-        out_alias = runner.invoke(cli, ["undo-last", id2, "--json"])
-        assert out_short.exit_code == out_alias.exit_code
-        d_short = json.loads(out_short.output)
-        d_alias = json.loads(out_alias.output)
-        assert set(d_short.keys()) == set(d_alias.keys())
-        assert d_short.get("undone") == d_alias.get("undone")
+        out_short = runner.invoke(cli, ["undo", id1, "--expected-event-id", "1", "--json"])
+        out_alias = runner.invoke(cli, ["undo-last", id2, "--expected-event-id", "1", "--json"])
+        assert out_short.exit_code == out_alias.exit_code == 0
+        assert json.loads(out_short.output) == json.loads(out_alias.output) == {"result": "no_op", "reason": "no_reversible_event"}
+
+        for issue_id in (id1, id2):
+            runner.invoke(cli, ["update", issue_id, "--title", "renamed"])
+        stale_short = runner.invoke(cli, ["undo", id1, "--expected-event-id", "1", "--json"])
+        stale_alias = runner.invoke(cli, ["undo-last", id2, "--expected-event-id", "1", "--json"])
+        assert stale_short.exit_code == stale_alias.exit_code == 1
+        d_short = json.loads(stale_short.output)
+        d_alias = json.loads(stale_alias.output)
+        assert d_short["code"] == d_alias["code"] == "CONFLICT"
+
+        ok_short = runner.invoke(cli, ["undo", id1, "--expected-event-id", str(d_short["details"]["latest_event_id"]), "--json"])
+        ok_alias = runner.invoke(cli, ["undo-last", id2, "--expected-event-id", str(d_alias["details"]["latest_event_id"]), "--json"])
+        assert ok_short.exit_code == ok_alias.exit_code == 0
+        assert json.loads(ok_short.output)["undone"] is json.loads(ok_alias.output)["undone"] is True

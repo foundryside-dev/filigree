@@ -327,7 +327,13 @@ export function postClaimIssue(issueId, assignee) {
 }
 
 export function postReleaseIssue(issueId) {
-  return writeRequest(`/issue/${issueId}/release`, { body: {}, errorLabel: "Release failed" });
+  // The dashboard Release button is a human coordinator action: release is
+  // holder-checked by default, so it passes override (recorded as
+  // released_by_override in the issue's events).
+  return writeRequest(`/issue/${issueId}/release`, {
+    body: { override: true },
+    errorLabel: "Release failed",
+  });
 }
 
 export function postAddDependency(issueId, dependsOnId) {

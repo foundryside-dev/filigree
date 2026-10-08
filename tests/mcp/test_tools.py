@@ -324,8 +324,9 @@ class TestPublicIssueVocabulary:
     async def test_undo_last_nested_issue_uses_issue_id(self, mcp_db: FiligreeDB) -> None:
         issue = mcp_db.create_issue("MCP undo public")
         await call_tool("issue_update", {"issue_id": issue.id, "title": "Changed title"})
+        target = mcp_db.undo_candidate_event_id(issue.id)
 
-        result = await call_tool("admin_undo_last", {"issue_id": issue.id})
+        result = await call_tool("admin_undo_last", {"issue_id": issue.id, "expected_event_id": target})
 
         data = _parse(result)
         assert data["undone"] is True
@@ -1673,6 +1674,62 @@ class TestStartWork:
         data = _parse(result)
         assert data["code"] == ErrorCode.INVALID_TRANSITION
 
+    async def test_start_next_twice_returns_same_issue_already_holding(self, mcp_db: FiligreeDB) -> None:
+        """MCP F4: a retried work_start_next must not claim a second issue."""
+        first_issue = mcp_db.create_issue("start-next-first", type="task", priority=0)
+        second_issue = mcp_db.create_issue("start-next-second", type="task", priority=1)
+
+        first = _parse(await call_tool("work_start_next", {"assignee": "carol"}))
+        second = _parse(await call_tool("work_start_next", {"assignee": "carol"}))
+
+        assert first["issue_id"] == first_issue.id
+        assert first["already_holding"] is False
+        assert second["issue_id"] == first_issue.id
+        assert second["already_holding"] is True
+        assert mcp_db.get_issue(second_issue.id).assignee == ""
+        claimed = [e for e in mcp_db.get_issue_events(first_issue.id) if e["event_type"] == "claimed"]
+        assert len(claimed) == 1
+
+    async def test_start_next_client_request_id_replays(self, mcp_db: FiligreeDB) -> None:
+        issue = mcp_db.create_issue("start-next-replay", type="task", priority=0)
+        mcp_db.create_issue("start-next-other", type="task", priority=1)
+
+        first = _parse(await call_tool("work_start_next", {"assignee": "carol", "client_request_id": "req-1"}))
+        replay = _parse(await call_tool("work_start_next", {"assignee": "carol", "client_request_id": "req-1"}))
+
+        assert first["issue_id"] == issue.id
+        assert replay["issue_id"] == issue.id
+        assert replay["already_holding"] is True
+        claimed = [e for e in mcp_db.get_issue_events(issue.id) if e["event_type"] == "claimed"]
+        assert len(claimed) == 1
+        assert json.loads(claimed[0]["comment"]) == {"client_request_id": "req-1"}
+
+    async def test_claim_next_twice_returns_same_issue_already_holding(self, mcp_db: FiligreeDB) -> None:
+        first_issue = mcp_db.create_issue("claim-next-first", type="task", priority=0)
+        second_issue = mcp_db.create_issue("claim-next-second", type="task", priority=1)
+
+        first = _parse(await call_tool("work_claim_next", {"assignee": "carol"}))
+        second = _parse(await call_tool("work_claim_next", {"assignee": "carol"}))
+
+        assert first["issue_id"] == first_issue.id
+        assert first["already_holding"] is False
+        assert second["issue_id"] == first_issue.id
+        assert second["already_holding"] is True
+        assert mcp_db.get_issue(second_issue.id).assignee == ""
+
+    async def test_claim_next_client_request_id_replays(self, mcp_db: FiligreeDB) -> None:
+        issue = mcp_db.create_issue("claim-next-replay", type="task", priority=0)
+
+        first = _parse(await call_tool("work_claim_next", {"assignee": "carol", "client_request_id": "req-9"}))
+        replay = _parse(await call_tool("work_claim_next", {"assignee": "carol", "client_request_id": "req-9"}))
+
+        assert first["issue_id"] == issue.id
+        assert replay["issue_id"] == issue.id
+        assert replay["already_holding"] is True
+        claimed = [e for e in mcp_db.get_issue_events(issue.id) if e["event_type"] == "claimed"]
+        assert len(claimed) == 1
+        assert json.loads(claimed[0]["comment"]) == {"client_request_id": "req-9"}
+
 
 class TestClaimIssue:
     async def test_claim_success(self, mcp_db: FiligreeDB) -> None:
@@ -1960,6 +2017,133 @@ class TestClaimLeaseTools:
         data = _parse(result)
         assert data["code"] == ErrorCode.CONFLICT
         assert data["details"] == {"issue_id": issue.id, "observed": "agent-current", "expected": "agent-old"}
+
+    async def test_release_by_non_holder_is_conflict_by_default(self, mcp_db: FiligreeDB) -> None:
+        """MCP F3: work_release is holder-checked without any opt-in flag."""
+        issue = mcp_db.create_issue("Peer claim")
+        mcp_db.claim_issue(issue.id, assignee="agent-2")
+
+        data = _parse(await call_tool("work_release", {"issue_id": issue.id, "actor": "agent-1"}))
+
+        assert data["code"] == ErrorCode.CONFLICT
+        assert data["details"] == {"issue_id": issue.id, "observed": "agent-2", "expected": "agent-1"}
+        assert mcp_db.get_issue(issue.id).assignee == "agent-2"
+
+    async def test_release_override_records_event(self, mcp_db: FiligreeDB) -> None:
+        issue = mcp_db.create_issue("Coordinator release")
+        mcp_db.claim_issue(issue.id, assignee="agent-2")
+
+        data = _parse(
+            await call_tool(
+                "work_release",
+                {"issue_id": issue.id, "actor": "coordinator", "override": True, "reason": "agent-2 vanished"},
+            )
+        )
+
+        assert data["assignee"] == ""
+        events = mcp_db.get_issue_events(issue.id)
+        overrides = [e for e in events if e["event_type"] == "released_by_override"]
+        assert len(overrides) == 1
+        assert overrides[0]["actor"] == "coordinator"
+        assert overrides[0]["old_value"] == "agent-2"
+        assert overrides[0]["comment"] == "agent-2 vanished"
+        assert not [e for e in events if e["event_type"] == "released"]
+
+    async def test_release_unassigned_is_no_op(self, mcp_db: FiligreeDB) -> None:
+        issue = mcp_db.create_issue("Nobody holds this")
+        before = mcp_db.conn.execute("SELECT COUNT(*) FROM events WHERE issue_id = ?", (issue.id,)).fetchone()[0]
+
+        data = _parse(await call_tool("work_release", {"issue_id": issue.id, "actor": "agent-1"}))
+
+        assert data == {"result": "no_op", "reason": "not_claimed"}
+        after = mcp_db.conn.execute("SELECT COUNT(*) FROM events WHERE issue_id = ?", (issue.id,)).fetchone()[0]
+        assert after == before
+
+    async def test_release_if_held_parameter_is_tombstoned(self, mcp_db: FiligreeDB) -> None:
+        issue = mcp_db.create_issue("Tombstone")
+        mcp_db.claim_issue(issue.id, assignee="agent-1")
+
+        data = _parse(await call_tool("work_release", {"issue_id": issue.id, "actor": "agent-1", "if_held": True}))
+
+        assert data["code"] == ErrorCode.VALIDATION
+        assert data["details"] == {
+            "parameter": "if_held",
+            "renamed_to": None,
+            "migration": "holder check is now the default; use override:true for coordinator release",
+        }
+        assert mcp_db.get_issue(issue.id).assignee == "agent-1"
+
+
+class TestUndoTool:
+    """MCP F1: admin_undo_last is a CAS on expected_event_id and holder-checked."""
+
+    async def test_undo_requires_expected_event_id(self, mcp_db: FiligreeDB) -> None:
+        issue = mcp_db.create_issue("Undo me")
+        mcp_db.update_issue(issue.id, title="Renamed", actor="t")
+
+        data = _parse(await call_tool("admin_undo_last", {"issue_id": issue.id, "actor": "t"}))
+
+        assert data["code"] == ErrorCode.VALIDATION
+        assert "expected_event_id" in data["error"]
+        assert mcp_db.get_issue(issue.id).title == "Renamed"
+
+    async def test_undo_with_expected_event_id_succeeds(self, mcp_db: FiligreeDB) -> None:
+        issue = mcp_db.create_issue("Undo me")
+        mcp_db.update_issue(issue.id, title="Renamed", actor="t")
+        events = _parse(await call_tool("issue_event_list", {"issue_id": issue.id}))["items"]
+        target = next(e for e in events if e["event_type"] == "title_changed")
+
+        data = _parse(await call_tool("admin_undo_last", {"issue_id": issue.id, "actor": "t", "expected_event_id": target["event_id"]}))
+
+        assert data["undone"] is True
+        assert data["event_id"] == target["event_id"]
+        assert data["title"] == "Undo me"
+
+    async def test_undo_mismatched_event_id_is_conflict(self, mcp_db: FiligreeDB) -> None:
+        issue = mcp_db.create_issue("Undo me")
+        mcp_db.update_issue(issue.id, title="First", actor="t")
+        stale = mcp_db.undo_candidate_event_id(issue.id)
+        mcp_db.update_issue(issue.id, title="Second", actor="t")
+        latest = mcp_db.undo_candidate_event_id(issue.id)
+
+        data = _parse(await call_tool("admin_undo_last", {"issue_id": issue.id, "actor": "t", "expected_event_id": stale}))
+
+        assert data["code"] == ErrorCode.CONFLICT
+        assert data["details"]["latest_event_id"] == latest
+        assert mcp_db.get_issue(issue.id).title == "Second"
+
+    async def test_undo_by_non_holder_is_conflict(self, mcp_db: FiligreeDB) -> None:
+        issue = mcp_db.create_issue("Undo me")
+        mcp_db.claim_issue(issue.id, assignee="alice", actor="alice")
+        target = mcp_db.undo_candidate_event_id(issue.id)
+
+        data = _parse(await call_tool("admin_undo_last", {"issue_id": issue.id, "actor": "bob", "expected_event_id": target}))
+
+        assert data["code"] == ErrorCode.CONFLICT
+        assert data["details"]["holder"] == "alice"
+        assert mcp_db.get_issue(issue.id).assignee == "alice"
+
+    async def test_undo_override_by_coordinator(self, mcp_db: FiligreeDB) -> None:
+        issue = mcp_db.create_issue("Undo me")
+        mcp_db.claim_issue(issue.id, assignee="alice", actor="alice")
+        target = mcp_db.undo_candidate_event_id(issue.id)
+
+        data = _parse(
+            await call_tool(
+                "admin_undo_last",
+                {"issue_id": issue.id, "actor": "coordinator", "expected_event_id": target, "override": True},
+            )
+        )
+
+        assert data["undone"] is True
+        assert mcp_db.get_issue(issue.id).assignee == ""
+
+    async def test_undo_nothing_is_no_op(self, mcp_db: FiligreeDB) -> None:
+        issue = mcp_db.create_issue("Nothing to undo")
+
+        data = _parse(await call_tool("admin_undo_last", {"issue_id": issue.id, "actor": "t", "expected_event_id": 1}))
+
+        assert data == {"result": "no_op", "reason": "no_reversible_event"}
 
 
 class TestGetChanges:
@@ -4570,29 +4754,31 @@ class TestMCPReleaseClaim:
     async def test_release_via_mcp(self, mcp_db: FiligreeDB) -> None:
         issue = mcp_db.create_issue("MCP release")
         mcp_db.claim_issue(issue.id, assignee="agent-1")
-        result = await call_tool("work_release", {"issue_id": issue.id})
+        result = await call_tool("work_release", {"issue_id": issue.id, "actor": "agent-1"})
         data = _parse(result)
         assert data["status"] == "open"  # status unchanged
         assert data["assignee"] == ""
 
-    async def test_release_conflict_via_mcp(self, mcp_db: FiligreeDB) -> None:
+    async def test_release_unassigned_is_no_op_not_conflict_via_mcp(self, mcp_db: FiligreeDB) -> None:
         issue = mcp_db.create_issue("Not claimed")
         result = await call_tool("work_release", {"issue_id": issue.id})
         data = _parse(result)
-        assert data["code"] == ErrorCode.CONFLICT
+        assert data == {"result": "no_op", "reason": "not_claimed"}
 
-    async def test_release_if_held_unassigned_is_noop_via_mcp(self, mcp_db: FiligreeDB) -> None:
-        issue = mcp_db.create_issue("Not claimed")
-        result = await call_tool("work_release", {"issue_id": issue.id, "actor": "agent-1", "if_held": True})
+    async def test_release_honors_expected_assignee_via_mcp(self, mcp_db: FiligreeDB) -> None:
+        issue = mcp_db.create_issue("Named holder")
+        mcp_db.claim_issue(issue.id, assignee="agent-2")
+
+        result = await call_tool("work_release", {"issue_id": issue.id, "actor": "coordinator", "expected_assignee": "agent-2"})
+
         data = _parse(result)
-        assert data["issue_id"] == issue.id
         assert data["assignee"] == ""
 
-    async def test_release_if_held_rejects_other_assignee_via_mcp(self, mcp_db: FiligreeDB) -> None:
+    async def test_release_rejects_other_assignee_via_mcp(self, mcp_db: FiligreeDB) -> None:
         issue = mcp_db.create_issue("Other claim")
         mcp_db.claim_issue(issue.id, assignee="agent-2")
 
-        result = await call_tool("work_release", {"issue_id": issue.id, "actor": "agent-1", "if_held": True})
+        result = await call_tool("work_release", {"issue_id": issue.id, "actor": "agent-1"})
 
         data = _parse(result)
         assert data["code"] == ErrorCode.CONFLICT

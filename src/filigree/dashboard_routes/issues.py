@@ -338,17 +338,26 @@ def _parse_batch_close_body(body: dict[str, Any], *, request: Request | None = N
 
 
 def _parse_release_claim_body(body: dict[str, Any]) -> dict[str, Any] | JSONResponse:
-    """Validate optional release-claim body fields shared by classic and weft."""
+    """Validate optional release-claim body fields shared by classic and weft.
+
+    Release is holder-checked by default (Task 0.4): ``override: true`` is the
+    coordinator path. ``if_held`` is still accepted (and type-checked) so the
+    frozen weft request shape stays valid, but it no longer changes anything —
+    holder-checked, unassigned-is-a-no-op release is now the only behaviour.
+    """
     if_held = body.get("if_held", False)
     if not isinstance(if_held, bool):
         return _error_response("if_held must be a boolean", ErrorCode.VALIDATION, 400)
+    override = body.get("override", False)
+    if not isinstance(override, bool):
+        return _error_response("override must be a boolean", ErrorCode.VALIDATION, 400)
     expected_assignee = body.get("expected_assignee")
     if expected_assignee is not None and not isinstance(expected_assignee, str):
         return _error_response("expected_assignee must be a string", ErrorCode.VALIDATION, 400)
     reason = _validate_body_string_field(body, "reason", default="")
     if not isinstance(reason, str):
         return reason
-    return {"if_held": if_held, "expected_assignee": expected_assignee, "reason": reason}
+    return {"override": override, "expected_assignee": expected_assignee, "reason": reason}
 
 
 # ---------------------------------------------------------------------------
@@ -926,7 +935,9 @@ def create_classic_router() -> APIRouter:
         if isinstance(release_options, JSONResponse):
             return release_options
         try:
-            issue = db.release_claim(issue_id, actor=actor, **release_options)
+            released = db.release_claim(issue_id, actor=actor, **release_options)
+            # None: nobody held it — idempotent; answer with the unchanged issue.
+            issue = released if released is not None else db.get_issue(issue_id)
         except KeyError:
             return _error_response(f"Issue not found: {issue_id}", ErrorCode.NOT_FOUND, 404)
         except WrongProjectError as e:
@@ -1567,7 +1578,9 @@ def create_weft_router() -> APIRouter:
         if isinstance(release_options, JSONResponse):
             return release_options
         try:
-            issue = db.release_claim(issue_id, actor=actor, **release_options)
+            released = db.release_claim(issue_id, actor=actor, **release_options)
+            # None: nobody held it — idempotent; answer with the unchanged issue.
+            issue = released if released is not None else db.get_issue(issue_id)
         except KeyError:
             return _error_response(f"Issue not found: {issue_id}", ErrorCode.NOT_FOUND, 404)
         except WrongProjectError as e:

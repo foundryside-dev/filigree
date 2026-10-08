@@ -184,7 +184,8 @@ filigree changes --since 2026-01-15T00:00:00 # everything since a timestamp
 ### Undoing Mistakes
 
 ```bash
-filigree undo <id>    # reverts last reversible action (status, priority, etc.)
+filigree events <id>                            # find the newest reversible event id
+filigree undo <id> --expected-event-id <n>      # reverts exactly that action (status, priority, etc.)
 ```
 
 Only reversible actions can be undone. Check `filigree events <id>` first to

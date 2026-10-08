@@ -211,9 +211,20 @@ block.
 
 #### `admin_undo_last`
 
+Undo is a compare-and-swap on the event to reverse. Read the issue's events
+with `issue_event_list` and pass the `event_id` of the newest reversible event
+as `expected_event_id`. If that is not the event undo would reverse, the call
+returns `CONFLICT` with `details.latest_event_id` and changes nothing, so a
+retried undo never walks back a second event. When another actor holds a live
+claim on the issue, the call returns `CONFLICT` with `details.holder` unless
+`override=true` (coordinator; recorded on the `undone` event). Nothing left to
+reverse returns `{"result": "no_op", "reason": "no_reversible_event"}`.
+
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `issue_id` | string | yes | Issue ID |
+| `expected_event_id` | integer | yes | `event_id` of the event to reverse (from `issue_event_list`) |
+| `override` | boolean | no | Coordinator undo of an issue whose live claim another actor holds |
 | `actor` | string | no | Agent identity for audit trail |
 
 ### Ready and Blocked
@@ -368,7 +379,7 @@ Step deps within a phase use integer indices. Cross-phase deps use `"phase_idx.s
 | `work_start_next` | Claim highest-priority ready issue and transition it into work (skips non-startable candidates) |
 | `work_claim` | Claim only, with optimistic locking |
 | `work_claim_next` | Claim highest-priority ready issue only |
-| `work_release` | Release a claim, optionally idempotently with `if_held` |
+| `work_release` | Release a claim you hold (holder-checked; `override` for coordinators; unassigned is a no-op) |
 | `work_release_mine` | Bulk-release every live claim held by one actor |
 | `work_heartbeat` | Refresh claim liveness for active work |
 | `work_stale_list` | List assigned work with expired leases or old legacy assignments |
@@ -402,6 +413,12 @@ skipped. Pass `advance=true` to make them startable via the multi-hop soft walk.
 | `target_status` | string | no | Working status override |
 | `advance` | boolean | no | Walk soft transitions to wip so multi-hop types (e.g. `triage` bugs) become startable instead of skipped. Default `false`. |
 | `actor` | string | no | Agent identity (defaults to assignee) |
+| `client_request_id` | string | no | Idempotency key: a retry with the same id returns the issue that request claimed, if still held |
+
+`work_start_next` and `work_claim_next` are retry-safe: when the assignee
+already holds an in-progress claim (`work_claim_next`: any live claim), that
+issue is returned with `already_holding: true` and nothing is written, instead
+of claiming a second issue. Every success response carries `already_holding`.
 
 #### `work_claim`
 
@@ -420,15 +437,24 @@ skipped. Pass `advance=true` to make them startable via the multi-hop soft walk.
 | `priority_min` | 0-4 | no | Minimum priority |
 | `priority_max` | 0-4 | no | Maximum priority |
 | `actor` | string | no | Agent identity (defaults to assignee) |
+| `client_request_id` | string | no | Idempotency key: a retry with the same id returns the issue that request claimed, if still held |
 
 #### `work_release`
+
+Holder-checked: the issue must be held by `expected_assignee`, or by `actor`
+when that is omitted; a claim held by anyone else returns `CONFLICT` and is
+left alone. To free a peer's stale claim use `work_reclaim`; `override=true`
+is the coordinator release, recorded as a `released_by_override` event.
+Releasing an issue nobody holds returns `{"result": "no_op", "reason":
+"not_claimed"}`. The former `if_held` parameter was removed (3.4.0); passing
+it returns `VALIDATION` with `details.migration`.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `issue_id` | string | yes | Issue ID |
-| `actor` | string | no | Agent identity for audit trail |
-| `if_held` | boolean | no | Idempotent release-if-held mode; unassigned issues are returned unchanged, but held-by-other mismatches return `CONFLICT` |
-| `expected_assignee` | string | no | Only release when the current assignee matches this value; defaults to `actor` in `if_held` mode |
+| `actor` | string | no | Agent identity for audit trail; the expected holder by default |
+| `expected_assignee` | string | no | Expected current holder; defaults to `actor`. A mismatch is `CONFLICT`, even with `override` |
+| `override` | boolean | no | Coordinator release of a claim `actor` does not hold |
 | `reason` | string | no | Audit reason recorded on the release event |
 
 #### `work_release_mine`
@@ -677,7 +703,8 @@ agent's artifacts.
    dry_run=true)`, then repeat with `dry_run=false` and a `reason` once the
    preview is right. Use `label_prefix` only when the prefix is unique enough
    for the session. A claim held by another actor is a `CONFLICT`, not a
-   release-if-held no-op; investigate it before retrying as a coordinator.
+   no-op; investigate it before retrying as a coordinator (`work_reclaim`, or
+   `work_release` with `override=true`).
 3. List pending notes with `observation_list(actor=...)`, then use
    `observation_promote_to_issue`, `observation_batch_link`, or
    `observation_batch_dismiss` so observations are either tracked, attached as

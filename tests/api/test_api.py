@@ -717,11 +717,40 @@ class TestClaimAPI:
         dashboard_db.db.claim_issue(ids["a"], assignee="agent-1")
         resp = await client.post(
             f"/api/issue/{ids['a']}/release",
-            json={},
+            json={"actor": "agent-1"},
         )
         assert resp.status_code == 200
         data = resp.json()
         assert data["assignee"] == ""
+
+    async def test_release_claim_by_non_holder_is_conflict_by_default(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        """Task 0.4: release is holder-checked with no opt-in (the default actor is 'dashboard')."""
+        ids = dashboard_db.ids
+        dashboard_db.db.claim_issue(ids["a"], assignee="agent-1")
+
+        resp = await client.post(f"/api/issue/{ids['a']}/release", json={})
+
+        assert resp.status_code == 409
+        assert resp.json()["code"] == "CONFLICT"
+        assert dashboard_db.db.get_issue(ids["a"]).assignee == "agent-1"
+
+    async def test_release_claim_override_is_coordinator_release(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        """The dashboard Release button posts {override: true}; it is audited."""
+        ids = dashboard_db.ids
+        dashboard_db.db.claim_issue(ids["a"], assignee="agent-1")
+
+        resp = await client.post(f"/api/weft/issues/{ids['a']}/release", json={"override": True})
+
+        assert resp.status_code == 200
+        assert resp.json()["assignee"] == ""
+        events = dashboard_db.db.get_issue_events(ids["a"])
+        assert [e["actor"] for e in events if e["event_type"] == "released_by_override"] == ["dashboard"]
+
+    async def test_release_claim_unassigned_is_idempotent(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        ids = dashboard_db.ids
+        resp = await client.post(f"/api/weft/issues/{ids['a']}/release", json={"actor": "agent-1"})
+        assert resp.status_code == 200
+        assert resp.json()["assignee"] == ""
 
     async def test_release_if_held_unassigned_classic(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
         ids = dashboard_db.ids

@@ -141,8 +141,8 @@ class ClaimIssueArgs(TypedDict):
 class ReleaseClaimArgs(TypedDict):
     issue_id: str
     actor: NotRequired[str]
-    if_held: NotRequired[bool]
     expected_assignee: NotRequired[str]
+    override: NotRequired[bool]
     reason: NotRequired[str]
     revert_status: NotRequired[bool]
 
@@ -184,6 +184,7 @@ class ClaimNextArgs(TypedDict):
     priority_min: NotRequired[int]
     priority_max: NotRequired[int]
     actor: NotRequired[str]
+    client_request_id: NotRequired[str]
 
 
 class StartWorkArgs(TypedDict):
@@ -204,6 +205,7 @@ class StartNextWorkArgs(TypedDict):
     target_status: NotRequired[str]
     actor: NotRequired[str]
     advance: NotRequired[bool]
+    client_request_id: NotRequired[str]
 
 
 class BatchCloseArgs(TypedDict):
@@ -450,6 +452,8 @@ class CompactEventsArgs(TypedDict):
 
 class UndoLastArgs(TypedDict):
     issue_id: str
+    expected_event_id: int
+    override: NotRequired[bool]
     actor: NotRequired[str]
 
 

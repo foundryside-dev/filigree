@@ -309,10 +309,21 @@ class TestJsonRetrofit:
         r = runner.invoke(cli, ["create", "Undo JSON"])
         issue_id = _extract_id(r.output)
         runner.invoke(cli, ["update", issue_id, "--title", "Changed"])
-        result = runner.invoke(cli, ["undo", issue_id, "--json"])
+        events = json.loads(runner.invoke(cli, ["events", issue_id, "--json"]).output)
+        target = next(e for e in events["items"] if e["event_type"] == "title_changed")
+        result = runner.invoke(cli, ["undo", issue_id, "--expected-event-id", str(target["event_id"]), "--json"])
         assert result.exit_code == 0
         data = json.loads(result.output)
         assert data["undone"] is True
+
+    def test_undo_requires_expected_event_id(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        r = runner.invoke(cli, ["create", "Undo needs id"])
+        issue_id = _extract_id(r.output)
+        runner.invoke(cli, ["update", issue_id, "--title", "Changed"])
+        result = runner.invoke(cli, ["undo", issue_id, "--json"])
+        assert result.exit_code == 2
+        assert json.loads(result.output)["code"] == "VALIDATION"
 
     def test_guide_json(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project

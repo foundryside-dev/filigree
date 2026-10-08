@@ -1078,7 +1078,7 @@ class TestReleaseCli:
         r = runner.invoke(cli, ["create", "Releasable"])
         issue_id = _extract_id(r.output)
         runner.invoke(cli, ["claim", issue_id, "--assignee", "agent-1"])
-        result = runner.invoke(cli, ["release", issue_id])
+        result = runner.invoke(cli, ["--actor", "agent-1", "release", issue_id])
         assert result.exit_code == 0
         assert "Released" in result.output
 
@@ -1087,40 +1087,39 @@ class TestReleaseCli:
         result = runner.invoke(cli, ["release", "test-nonexistent"])
         assert result.exit_code == 1
 
-    def test_release_not_claimed(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+    def test_release_not_claimed_is_noop(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
         r = runner.invoke(cli, ["create", "Not claimed"])
         issue_id = _extract_id(r.output)
         result = runner.invoke(cli, ["release", issue_id])
-        assert result.exit_code == 1
+        assert result.exit_code == 0, result.output
+        assert "No-op" in result.output
 
     def test_release_json(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
         r = runner.invoke(cli, ["create", "JSON release"])
         issue_id = _extract_id(r.output)
         runner.invoke(cli, ["claim", issue_id, "--assignee", "agent-1"])
-        result = runner.invoke(cli, ["release", issue_id, "--json"])
+        result = runner.invoke(cli, ["--actor", "agent-1", "release", issue_id, "--json"])
         assert result.exit_code == 0
         data = json.loads(result.output)
         assert data["issue_id"] == issue_id
         assert "id" not in data
         assert data["assignee"] == ""
 
-    def test_release_if_held_unassigned_json(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+    def test_release_unassigned_json_is_no_op(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
-        r = runner.invoke(cli, ["create", "JSON release if held"])
+        r = runner.invoke(cli, ["create", "JSON release unassigned"])
         issue_id = _extract_id(r.output)
 
-        result = runner.invoke(cli, ["--actor", "agent-1", "release", issue_id, "--if-held", "--json"])
+        result = runner.invoke(cli, ["--actor", "agent-1", "release", issue_id, "--json"])
 
         assert result.exit_code == 0, result.output
         # Read stdout directly so Click merged output cannot contaminate the JSON
         # contract with unrelated stderr diagnostics.
-        data = json.loads(result.stdout)
-        assert data["issue_id"] == issue_id
-        assert data["assignee"] == ""
+        assert json.loads(result.stdout) == {"result": "no_op", "reason": "not_claimed"}
 
-    def test_release_if_held_expected_assignee_json(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+    def test_release_expected_assignee_json(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
         r = runner.invoke(cli, ["create", "JSON release expected holder"])
         issue_id = _extract_id(r.output)
@@ -1128,30 +1127,47 @@ class TestReleaseCli:
 
         result = runner.invoke(
             cli,
-            ["--actor", "coordinator", "release", issue_id, "--if-held", "--expected-assignee", "agent-1", "--json"],
+            ["--actor", "coordinator", "release", issue_id, "--expected-assignee", "agent-1", "--json"],
         )
 
         assert result.exit_code == 0, result.output
-        # Read stdout directly so Click merged output cannot contaminate the JSON
-        # contract with unrelated stderr diagnostics.
         data = json.loads(result.stdout)
         assert data["assignee"] == ""
 
-    def test_release_if_held_rejects_other_assignee_json(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+    def test_release_rejects_other_assignee_json(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
         r = runner.invoke(cli, ["create", "JSON release other holder"])
         issue_id = _extract_id(r.output)
         runner.invoke(cli, ["claim", issue_id, "--assignee", "agent-2"])
 
-        result = runner.invoke(cli, ["--actor", "agent-1", "release", issue_id, "--if-held", "--json"])
+        result = runner.invoke(cli, ["--actor", "agent-1", "release", issue_id, "--json"])
 
         assert result.exit_code == 1
-        # Read stdout directly so Click merged output cannot contaminate the JSON
-        # contract with unrelated stderr diagnostics.
         data = json.loads(result.stdout)
         assert data["code"] == "CONFLICT"
         assert "agent-2" in data["error"]
         assert data["details"] == {"issue_id": issue_id, "observed": "agent-2", "expected": "agent-1"}
+
+    def test_release_override_json(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        r = runner.invoke(cli, ["create", "JSON release override"])
+        issue_id = _extract_id(r.output)
+        runner.invoke(cli, ["claim", issue_id, "--assignee", "agent-2"])
+
+        result = runner.invoke(cli, ["--actor", "coordinator", "release", issue_id, "--override", "--json"])
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.stdout)["assignee"] == ""
+
+    def test_release_if_held_flag_removed(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        r = runner.invoke(cli, ["create", "No if-held"])
+        issue_id = _extract_id(r.output)
+
+        result = runner.invoke(cli, ["--actor", "agent-1", "release", issue_id, "--if-held"])
+
+        assert result.exit_code == 2
+        assert "--if-held" in result.output
 
     def test_release_json_not_found(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project

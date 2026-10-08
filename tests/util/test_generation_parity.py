@@ -861,7 +861,7 @@ class TestWeftGenerationParityIssues:
         assert cl.json()["assignee"] == "tester"
 
         # RELEASE
-        rl = await dashboard_surface.post(f"/api/weft/issues/{a_id}/release", json={})
+        rl = await dashboard_surface.post(f"/api/weft/issues/{a_id}/release", json={"actor": "tester"})
         assert rl.status_code == 200, rl.text
         _assert_issue_weft_shape(rl.json(), path="release")
 

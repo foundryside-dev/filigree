@@ -89,3 +89,30 @@ def test_guard_can_detect_an_old_name() -> None:
     sample_new = RENAME_MAP[sample_old]
     assert _OLD_NAME_RE.search(f"call {sample_old} to read it")
     assert not _OLD_NAME_RE.search(f"call {sample_new} to read it")
+
+
+# ---------------------------------------------------------------------------
+# Served skill prose: the Stale Claims recipe (Task 0.4, LX-05)
+# ---------------------------------------------------------------------------
+
+_SKILL_REFERENCE = "skills/filigree-workflow/references/team-coordination.md"
+
+
+def _section(markdown: str, heading: str) -> str:
+    """Return the body of the ``### <heading>`` section (up to the next heading)."""
+    match = re.search(rf"^###\s+{re.escape(heading)}\s*$(.*?)(?=^#{{1,3}}\s)", markdown, flags=re.MULTILINE | re.DOTALL)
+    assert match is not None, f"section {heading!r} not found"
+    return match.group(1)
+
+
+def test_stale_claims_recipe_never_releases_a_peer_claim() -> None:
+    """A peer's stale claim is transferred with ``reclaim`` (holder-checked CAS),
+    never freed with ``release`` — releasing another agent's claim is the MCP F3
+    bypass this recipe used to teach."""
+    from importlib.resources import files
+
+    text = (files("filigree") / _SKILL_REFERENCE).read_text(encoding="utf-8")
+    section = _section(text, "Stale Claims")
+    assert "filigree release <issue-id>" not in section
+    assert "filigree stale-claims" in section
+    assert "filigree reclaim <issue-id>" in section

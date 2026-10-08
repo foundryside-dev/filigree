@@ -64,7 +64,8 @@ class TestTaskTypeTemplates:
     def test_task_release_clears_assignee(self, db: FiligreeDB) -> None:
         issue = db.create_issue("Do something", type="task")
         db.claim_issue(issue.id, assignee="agent")
-        released = db.release_claim(issue.id)
+        released = db.release_claim(issue.id, actor="agent")
+        assert released is not None
         assert released.status == "open"  # status unchanged — release only clears assignee
         assert released.assignee == ""
 

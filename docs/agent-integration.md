@@ -95,7 +95,7 @@ work_start(issue_id="...", assignee="agent-1")            # Claim + transition a
 work_start_next(assignee="agent-1", priority_max=1)       # Highest-priority ready, with filters
 work_claim(issue_id="...", assignee="agent-2")           # Niche: reserve without transitioning
 work_release(issue_id="...")                             # Clear assignee without changing status
-work_release(issue_id="...", actor="agent-1", if_held=True)  # Unassigned no-op; held-by-other returns CONFLICT
+work_release(issue_id="...", actor="agent-1")  # Holder-checked; unassigned is a no-op; held-by-other returns CONFLICT
 work_heartbeat(issue_id="...", actor="agent-1")           # Refresh claim liveness
 work_stale_list(stale_after_hours=48, expires_within_hours=2)  # Find abandoned, expired, or soon-expiring claims
 work_reclaim(issue_id="...", assignee="agent-2", expected_assignee="agent-1", reason="missed heartbeat")

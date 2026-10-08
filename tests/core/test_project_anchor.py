@@ -1193,7 +1193,7 @@ class TestWrongProjectErrorOnWrites:
 
     def test_release_claim_with_wrong_prefix_raises(self, db_p: FiligreeDB) -> None:
         with pytest.raises(WrongProjectError):
-            db_p.release_claim("beefdata-abc123")
+            db_p.release_claim("beefdata-abc123", actor="agent-1")
         db_p.close()
 
     def test_release_my_claims_aborts_on_wrong_project(

@@ -213,9 +213,32 @@ class IssueWithUnblocked(PublicIssue):
 
 
 class ClaimNextResponse(PublicIssue):
-    """Claimed issue with human-readable selection reason."""
+    """Claimed issue with human-readable selection reason.
+
+    ``already_holding`` is true when the caller already held a live claim (or
+    replayed a ``client_request_id``) and was handed that issue back instead
+    of a second claim — the retry-safe answer (MCP F4).
+    """
 
     selection_reason: str
+    already_holding: bool
+
+
+class StartNextWorkResponse(PublicIssue):
+    """``work_start_next`` success: the started issue plus ``already_holding``."""
+
+    already_holding: bool
+
+
+class NoOpResponse(TypedDict):
+    """Idempotent no-op sentinel: the call's target state already holds.
+
+    ``reason`` is a snake_case token (``not_claimed``, ``no_reversible_event``).
+    The call-outcome logger classifies this shape as ``no_op``.
+    """
+
+    result: Literal["no_op"]
+    reason: str
 
 
 # ---------------------------------------------------------------------------
@@ -630,6 +653,41 @@ class ClaimConflictError(ValueError):
         return self.SAFE_MESSAGE
 
 
+class UndoConflictError(ValueError):
+    """Raised when ``undo_last`` refuses to reverse an event (MCP F1).
+
+    Two preconditions guard undo: ``expected_event_id`` must name the event
+    undo would actually reverse (``details.latest_event_id`` carries the real
+    one), and a live claim on the issue must be held by the caller unless the
+    caller passes ``override`` (``details.holder`` names the holder). Both map
+    to ``ErrorCode.CONFLICT``. Messages are fixed strings, so ``str(exc)`` is
+    safe to put on an untrusted wire; the specifics live in ``details``.
+    """
+
+    STALE_EVENT_MESSAGE = "expected_event_id is not the latest reversible event; re-read the issue's events and retry"
+    HOLDER_MESSAGE = "Issue is claimed by a different actor; only the holder can undo (or pass override:true as coordinator)"
+
+    def __init__(self, message: str, details: dict[str, Any]) -> None:
+        self.details = details
+        super().__init__(message)
+
+    @classmethod
+    def stale_event(cls, issue_id: str, *, expected_event_id: int, latest_event_id: int) -> UndoConflictError:
+        return cls(
+            cls.STALE_EVENT_MESSAGE,
+            {"issue_id": issue_id, "expected_event_id": expected_event_id, "latest_event_id": latest_event_id},
+        )
+
+    @classmethod
+    def held_by_other(cls, issue_id: str, *, holder: str, actor: str) -> UndoConflictError:
+        return cls(cls.HOLDER_MESSAGE, {"issue_id": issue_id, "holder": holder, "actor": actor})
+
+
+def undo_conflict_envelope(exc: UndoConflictError) -> ErrorResponse:
+    """Return the canonical CONFLICT envelope for a refused undo."""
+    return ErrorResponse(error=str(exc), code=ErrorCode.CONFLICT, details=dict(exc.details))
+
+
 def claim_conflict_details(exc: ClaimConflictError) -> dict[str, str]:
     """Return the stable details payload for claim-aware CONFLICT envelopes."""
     return {"issue_id": exc.issue_id, "observed": exc.observed, "expected": exc.expected}
@@ -954,10 +1012,13 @@ def classify_issue_write_error(exc: BaseException) -> ErrorCode:
 
 
 def classify_release_claim_error(issue_id: str, exc: BaseException) -> ErrorCode:
-    """Classify release-claim failures consistently across public surfaces."""
-    msg = str(exc)
-    if msg.startswith(f"Cannot release {issue_id}:") and "no assignee set" in msg:
-        return ErrorCode.CONFLICT
+    """Classify release-claim failures consistently across public surfaces.
+
+    Releasing an unassigned issue is an idempotent no-op (Task 0.4), not an
+    error, so no release failure needs special-casing beyond the claim-aware
+    write classification. ``issue_id`` is kept for call-site stability.
+    """
+    del issue_id
     return classify_issue_write_error(exc)
 
 

@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+Two claim-verb contracts change in this minor on purpose: they closed bypasses
+where any actor could undo or release another agent's work (MCP F1, F3). They
+ship without the usual one-minor deprecation; the forthcoming deprecation
+policy (ADR-030) records this as its one pre-4.0 exception.
+
+- **`admin_undo_last` requires `expected_event_id` and is holder-checked (MCP
+  F1).** Pass the `event_id` of the event to reverse, read from
+  `issue_event_list`. If it is not the newest reversible event, the call returns
+  `CONFLICT` with `details.latest_event_id` and changes nothing. A retried undo
+  can no longer walk back one more event per call. If another actor holds a
+  live claim on the issue, the call returns `CONFLICT` with `details.holder`
+  unless `override: true` (coordinator); an overriding undo records
+  `{"override": true, "holder": ...}` on its `undone` event. Nothing left to
+  reverse returns `{"result": "no_op", "reason": "no_reversible_event"}` instead
+  of `{"undone": false, ...}`. CLI: `filigree undo` / `undo-last` require
+  `--expected-event-id <n>` and gain `--override`; the no-op exits 0. Python:
+  `undo_last(issue_id, *, actor, expected_event_id, override=False)`, plus
+  `undo_candidate_event_id(issue_id)`.
+- **`work_release` is holder-checked by default; `if_held` is removed (MCP
+  F3).** The issue must be held by `expected_assignee`, or by `actor` when that
+  is omitted. A claim held by anyone else returns `CONFLICT` and is left alone.
+  `override: true` is the coordinator release and is recorded as a new
+  `released_by_override` event (not undoable). Releasing an issue nobody holds
+  returns `{"result": "no_op", "reason": "not_claimed"}`, never `CONFLICT`.
+  Passing `if_held` now returns `VALIDATION` with `details` `{parameter:
+  "if_held", renamed_to: null, migration: "holder check is now the default; use
+  override:true for coordinator release"}`. CLI: `filigree release` /
+  `release-claim` drop `--if-held` and gain `--override`; the no-op exits 0.
+  HTTP (`POST /api/issue/{id}/release`, `/api/weft/issues/{id}/release`): same
+  holder check, new optional `override` body field. `if_held` is still accepted
+  but no longer changes anything. An unclaimed issue answers 200 with the
+  unchanged issue. The dashboard's Release button sends `override: true`, so
+  its releases are recorded as `released_by_override` by `dashboard`. Python:
+  `release_claim(issue_id, *, actor, expected_assignee=None, override=False,
+  reason="", revert_status=True) -> Issue | None` (`None` is the no-op).
+
 ### Added
 
 - **Call-outcome logging on every surface, and a per-project population tag.**
@@ -24,6 +62,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`work_start_next` / `work_claim_next` are retry-safe (MCP F4).** A retried
+  call no longer claims a second issue and strands the first for the 48 h
+  lease. If the assignee already holds an in-progress claim (`work_claim_next`:
+  any live claim), that issue is returned with `already_holding: true` and
+  nothing is written. Both tools accept an optional `client_request_id`. A
+  retry with the same id returns the issue that request claimed, if the
+  assignee still holds it. The id is stored on the `claimed` event's comment
+  (no schema change). Every success response now carries `already_holding`.
+  The CLI `claim-next` / `start-next-work` follow the same rule and print
+  `Already holding …`. A new table-driven call-twice harness
+  (`tests/mcp/test_call_twice.py`) pins the second-call outcome class of the
+  core-loop verbs. The `filigree-workflow` skill's Stale Claims recipe now uses
+  `stale-claims` → `reclaim` instead of releasing a peer's claim (LX-05). No
+  schema change.
 - **Archived Legis can no longer wedge a close (M-7, HTTP F1).** The closure
   gate used to call Legis synchronously (urllib, 5 s timeout) from inside async
   handlers and fail closed when it was unreachable, so a single set `LEGIS_URL`

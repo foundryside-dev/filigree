@@ -48,7 +48,7 @@ class TestRaiseSites:
         issue = db.create_issue("Task", type="task")
         db.claim_issue(issue.id, assignee="alice", actor="alice")
         with pytest.raises(ClaimConflictError):
-            db.release_claim(issue.id, actor="bob", if_held=True)
+            db.release_claim(issue.id, actor="bob")
 
     def test_heartbeat_wrong_holder_raises_typed(self, db: FiligreeDB) -> None:
         issue = db.create_issue("Task", type="task")
@@ -125,4 +125,4 @@ class TestBatchDispatch:
         db.conn.execute("UPDATE issues SET assignee = 'mallory' WHERE id = ?", (issue.id,))
         db.conn.commit()
         with pytest.raises(ClaimConflictError):
-            db.release_claim(issue.id, actor="alice", if_held=True)
+            db.release_claim(issue.id, actor="alice")

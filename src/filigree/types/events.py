@@ -21,6 +21,7 @@ EventType = Literal[
     "parent_changed",
     "claimed",
     "released",
+    "released_by_override",
     "heartbeat",
     "reclaimed",
     "reopened",
@@ -85,6 +86,7 @@ def is_reversible_event_type(event_type: EventType) -> bool:
             "created"
             | "corrupt_fields_overwritten"
             | "released"
+            | "released_by_override"
             | "heartbeat"
             | "reclaimed"
             | "reopened"
@@ -152,4 +154,11 @@ class UndoFailure(TypedDict):
     reason: str
 
 
-UndoResult: TypeAlias = UndoSuccess | UndoFailure
+class UndoNoOp(TypedDict):
+    """``undo_last()`` found nothing left to reverse (an idempotent retry)."""
+
+    result: Literal["no_op"]
+    reason: Literal["no_reversible_event"]
+
+
+UndoResult: TypeAlias = UndoSuccess | UndoFailure | UndoNoOp

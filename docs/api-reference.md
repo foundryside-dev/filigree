@@ -355,22 +355,25 @@ def release_claim(
     self,
     issue_id: str,
     *,
-    actor: str = "",
-    if_held: bool = False,
+    actor: str,
     expected_assignee: str | None = None,
+    override: bool = False,
     reason: str = "",
-) -> Issue
+    revert_status: bool = True,
+) -> Issue | None
 ```
 
-Releases a claimed issue by clearing its assignee. Does **not** change status.
-By default this is strict and raises when the issue is already unassigned. With
-`if_held=True`, unassigned issues are returned unchanged, but assigned issues are
-only released when held by `expected_assignee` or, if omitted, `actor`;
-held-by-other mismatches raise `ClaimConflictError`.
+Releases a claimed issue by clearing its assignee (and, by default, reverting a
+wip-category status to its open predecessor). Holder-checked: the live assignee
+must equal `expected_assignee`, or `actor` when that is omitted. `override=True`
+is the coordinator release of a claim `actor` does not hold; it is recorded as a
+`released_by_override` event (an explicit `expected_assignee` is still
+enforced). An issue nobody holds returns `None` — the idempotent no-op.
 
-**Raises:** `ValueError` if strict mode sees no assignee; `ClaimConflictError`
-if `if_held=True` would clear a claim held by someone other than the expected
-holder.
+**Raises:** `ClaimConflictError` when the issue is held by someone other than
+the expected holder (without `override`), or is reassigned between read and
+write; `ValueError` for a blank actor without `override`, or a done-category
+issue.
 
 #### `heartbeat_work`
 
@@ -880,10 +883,16 @@ Returns events for a specific issue, newest first.
 #### `undo_last`
 
 ```python
-def undo_last(self, issue_id: str, *, actor: str = "") -> dict[str, Any]
+def undo_last(self, issue_id: str, *, actor: str = "", expected_event_id: int, override: bool = False) -> UndoResult
+def undo_candidate_event_id(self, issue_id: str) -> int | None
 ```
 
-Undoes the most recent reversible event for an issue. Reversible events: `status_changed`, `title_changed`, `priority_changed`, `assignee_changed`, `claimed`, `dependency_added`, `dependency_removed`, `description_changed`, `notes_changed`.
+Undoes the most recent reversible event for an issue. Reversible events: `status_changed`, `title_changed`, `priority_changed`, `assignee_changed`, `claimed`, `dependency_added`, `dependency_removed`, `description_changed`, `notes_changed`, `fields_changed`, `parent_changed`.
+
+`expected_event_id` must be the id of the event undo would reverse
+(`undo_candidate_event_id`); otherwise `UndoConflictError` is raised with
+`details.latest_event_id`. If another actor holds a live claim on the issue,
+`UndoConflictError` is raised with `details.holder` unless `override=True`.
 
 **Returns:**
 ```python
@@ -891,6 +900,9 @@ Undoes the most recent reversible event for an issue. Reversible events: `status
 {"undone": True, "event_type": str, "event_id": int, "issue": dict}
 
 # Nothing to undo:
+{"result": "no_op", "reason": "no_reversible_event"}
+
+# The event could not be reversed (e.g. it has no old_value):
 {"undone": False, "reason": str}
 ```
 

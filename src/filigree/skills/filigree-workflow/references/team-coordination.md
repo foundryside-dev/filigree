@@ -53,10 +53,12 @@ If an agent cannot finish the work:
 
 ```bash
 filigree add-comment <issue-id> "Releasing: blocked on X, needs Y to continue"
-filigree release <issue-id>
+filigree --actor <you> release <issue-id>           # only releases a claim you hold
 ```
 
 Always add a comment before releasing — the next agent needs context.
+Release is holder-checked against `--actor`; releasing an issue nobody holds
+is a harmless no-op.
 
 ## Handoff Protocol
 
@@ -168,12 +170,25 @@ If agents discover their tasks overlap:
 
 ### Stale Claims
 
-If an agent disappears without completing work:
+If an agent disappears without completing work, transfer its claim with
+`reclaim` — a holder-checked compare-and-swap that only succeeds while the
+missing agent still holds it. Never `release` a peer's claim: release is
+holder-checked and refuses with `CONFLICT` (a coordinator can force it with
+`--override`, which is recorded as `released_by_override`).
 
 ```bash
-filigree list --status=in_progress --assignee <missing-agent>
-filigree release <issue-id>                         # free the claim
-filigree add-comment <issue-id> "Released: previous agent did not complete"
+filigree stale-claims                               # claims whose lease lapsed
+filigree reclaim <issue-id> --assignee <you> \
+  --expected-assignee <missing-agent> --reason "missed heartbeat"
+filigree add-comment <issue-id> "Reclaimed: previous agent did not complete"
+```
+
+To keep your own claims from going stale, heartbeat long-running work and
+drop everything you still hold at session end:
+
+```bash
+filigree --actor <you> heartbeat-work <issue-id>    # MCP: work_heartbeat
+filigree --actor <you> release-my-claims            # MCP: work_release_mine
 ```
 
 ### CONFLICT Responses

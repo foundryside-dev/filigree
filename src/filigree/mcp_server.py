@@ -388,7 +388,7 @@ from filigree.mcp_tools import (  # noqa: E402, I001  — must come after global
     scanners as _scanners_mod,
     workflow as _workflow_mod,
 )
-from filigree.mcp_tools.rename import NEW_TO_OLD, RENAME_MAP  # noqa: E402
+from filigree.mcp_tools.rename import NEW_TO_OLD, REMOVED_PARAMETERS, RENAME_MAP  # noqa: E402
 from filigree.mcp_tools.tiers import tier_for  # noqa: E402
 
 _all_tools: list[Tool] = []
@@ -535,6 +535,15 @@ def _unknown_argument_error(tool_name: str, arguments: object) -> ErrorResponse 
     unknown = sorted(key for key in arguments if isinstance(key, str) and key not in allowed)
     if not unknown:
         return None
+    for key in unknown:
+        tombstone = REMOVED_PARAMETERS.get((tool_name, key))
+        if tombstone is not None:
+            served = RENAME_MAP.get(tool_name, tool_name)
+            return ErrorResponse(
+                error=f"Parameter {key!r} was removed from {served}: {tombstone['migration']}",
+                code=ErrorCode.VALIDATION,
+                details={"parameter": key, **tombstone},
+            )
     unknown_label = ", ".join(unknown)
     return ErrorResponse(
         error=f"Unknown parameter(s) for {tool_name}: {unknown_label}",

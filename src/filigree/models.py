@@ -66,6 +66,11 @@ class Issue:
     children: list[str] = field(default_factory=list)
     status_category: StatusCategory = "open"
     data_warnings: list[str] = field(default_factory=list)
+    # Transient, never stored or serialized by ``to_dict``: set by
+    # ``claim_next`` / ``start_next_work`` when they hand back a claim the
+    # assignee already holds instead of making a new one (MCP F4). Surfaces
+    # add it to their claim-next responses explicitly.
+    already_holding: bool = False
 
     def __post_init__(self) -> None:
         if self.status_category not in _VALID_STATUS_CATEGORIES:

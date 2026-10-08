@@ -72,8 +72,8 @@ async def test_sdk_input_schema_rejection_logged_as_validation(mcp_db: FiligreeD
 
 async def test_no_op_sentinel_logged_as_no_op(mcp_db: FiligreeDB, caplog_json: JsonLogCapture) -> None:
     issue = mcp_db.create_issue("fresh issue")
-    # A freshly created issue has only its creation event: nothing to undo.
-    await call_tool("admin_undo_last", {"issue_id": issue.id, "actor": "t"})
+    # Nobody holds a fresh issue: releasing it is the {"result": "no_op"} sentinel.
+    await call_tool("work_release", {"issue_id": issue.id, "actor": "t"})
     assert caplog_json.last(event="call")["outcome"] == "no_op"
 
 

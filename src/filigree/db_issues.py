@@ -45,6 +45,7 @@ from filigree.types.core import (
     make_issue_id,
     make_loomweave_entity_id,
 )
+from filigree.types.events import EventType
 from filigree.types.files import DeleteIssueResult
 from filigree.validation import sanitize_actor
 
@@ -152,6 +153,33 @@ def _fields_for_reopen(fields: dict[str, Any]) -> dict[str, Any]:
 def _claim_expiry(now: str, lease_hours: int = DEFAULT_CLAIM_LEASE_HOURS) -> str:
     """Return the expiry timestamp for a claim heartbeat."""
     return (datetime.fromisoformat(str(now)) + timedelta(hours=lease_hours)).isoformat()
+
+
+_CLIENT_REQUEST_ID_MAX_LEN = 200
+
+
+def _validate_client_request_id(value: object) -> str | None:
+    """Validate an optional caller-chosen idempotency key for claim-next verbs."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        msg = "client_request_id must be a non-empty string"
+        raise ValueError(msg)
+    if len(value) > _CLIENT_REQUEST_ID_MAX_LEN:
+        msg = f"client_request_id must be at most {_CLIENT_REQUEST_ID_MAX_LEN} characters"
+        raise ValueError(msg)
+    return value
+
+
+def _client_request_comment(client_request_id: str | None) -> str:
+    """Encode a ``client_request_id`` as the ``claimed`` event's comment payload.
+
+    Stored in the event (no schema change); the encoding is deterministic so
+    a replay lookup can match on string equality.
+    """
+    if client_request_id is None:
+        return ""
+    return json.dumps({"client_request_id": client_request_id})
 
 
 def _parse_issue_timestamp(raw: object) -> datetime | None:
@@ -1518,7 +1546,16 @@ class IssuesMixin(DBMixinProtocol):
 
     @_retry_busy()
     @_in_immediate_tx("claim_issue")
-    def claim_issue(self, issue_id: str, *, assignee: str, actor: str = "", commit: str | None = None, _skip_begin: bool = False) -> Issue:
+    def claim_issue(
+        self,
+        issue_id: str,
+        *,
+        assignee: str,
+        actor: str = "",
+        commit: str | None = None,
+        client_request_id: str | None = None,
+        _skip_begin: bool = False,
+    ) -> Issue:
         """Atomically claim an open/wip-category issue with optimistic locking.
 
         Sets assignee only — does NOT change status. Agent uses update_issue
@@ -1538,6 +1575,10 @@ class IssuesMixin(DBMixinProtocol):
         fresh claim; like ``claimed_at`` it is set via COALESCE so a same-agent
         re-claim preserves the original anchor. NULL when omitted. Stored
         verbatim, never parsed.
+
+        ``client_request_id`` (passed by ``claim_next`` / ``start_next_work``)
+        is recorded on the ``claimed`` event's comment so a retried call with
+        the same id can find and replay this claim (no schema change).
         """
         # filigree-694f7e9bf8: enforce the same trimmed-identity invariant as
         # create_issue/update_issue. Without normalization, claiming with
@@ -1592,7 +1633,14 @@ class IssuesMixin(DBMixinProtocol):
             msg = f"Cannot claim {issue_id}: status is '{current['status']}', expected open-category state or wip-category handoff state"
             raise ValueError(msg)
 
-        self._record_event(issue_id, "claimed", actor=actor, old_value=old_assignee, new_value=assignee)
+        self._record_event(
+            issue_id,
+            "claimed",
+            actor=actor,
+            old_value=old_assignee,
+            new_value=assignee,
+            comment=_client_request_comment(client_request_id),
+        )
         return self.get_issue(issue_id)
 
     @_retry_busy()
@@ -1601,16 +1649,31 @@ class IssuesMixin(DBMixinProtocol):
         self,
         issue_id: str,
         *,
-        actor: str = "",
-        if_held: bool = False,
+        actor: str,
         expected_assignee: str | None = None,
+        override: bool = False,
         reason: str = "",
         revert_status: bool = True,
-    ) -> Issue:
+    ) -> Issue | None:
         """Release a claimed issue by clearing its assignee.
 
-        Uses compare-and-swap on the observed assignee so a concurrent
-        reassignment between read and UPDATE cannot be silently erased.
+        Holder-checked by default (MCP F3): the live assignee must equal
+        ``expected_assignee`` when given, else ``actor``; a mismatch raises
+        ``ClaimConflictError`` and leaves the claim alone. ``override=True``
+        is the coordinator path: it drops the implicit ``actor`` holder check
+        (an explicit ``expected_assignee`` is still enforced — it is the
+        coordinator's own precondition) and the release is recorded as a
+        ``released_by_override`` event instead of ``released``.
+
+        Idempotent: an issue nobody holds — already unassigned, or released
+        concurrently between read and write — returns ``None`` (the surfaces
+        answer ``{"result": "no_op", "reason": "not_claimed"}``), never a
+        conflict. A done-category issue's assignee is closure audit trail, not
+        a claim, so releasing it is refused with ``ValueError``.
+
+        The UPDATE is a compare-and-swap on the observed assignee so a
+        concurrent reassignment between read and UPDATE cannot be silently
+        erased.
 
         When the issue is in a wip-category status, the call also reverts
         the status to the template-defined open-category predecessor so the
@@ -1624,34 +1687,28 @@ class IssuesMixin(DBMixinProtocol):
         direct predecessor exists. Types with no open-category state get
         no reverse target and stay in wip.
 
-        When ``if_held`` is true, the call is idempotent only for already
-        unassigned issues: those are returned unchanged. Claimed issues are
-        released only when the observed assignee matches ``expected_assignee``;
-        if no expected assignee is provided, ``actor`` is used as the expected
-        holder. A claimed-by-someone-else mismatch raises
-        ``ClaimConflictError`` rather than silently no-oping, so cleanup
-        scripts cannot hide ownership surprises.
-
         Args:
             issue_id: Claimed issue to release. The id prefix must belong to
                 this project for write operations.
-            actor: Audit identity. Also becomes the expected holder for
-                ``if_held=True`` when ``expected_assignee`` is omitted.
-            if_held: Make already-unassigned issues idempotent no-ops, while
-                still rejecting claims held by another assignee.
-            expected_assignee: Optional expected holder for ``if_held=True``.
-                A mismatch raises ``ClaimConflictError``.
-            reason: Audit comment recorded on the ``released`` event.
+            actor: Audit identity, and the expected holder when
+                ``expected_assignee`` is omitted.
+            expected_assignee: Explicit expected holder. A mismatch raises
+                ``ClaimConflictError`` (with or without ``override``).
+            override: Coordinator release of a claim the actor does not hold.
+            reason: Audit comment recorded on the release event.
             revert_status: When true, move wip-category issues back through the
                 declared reverse/escape transition to the open predecessor, or
                 to the template initial state when no direct predecessor exists.
 
+        Returns:
+            The released issue, or ``None`` when nobody held it (no-op).
+
         Raises:
             KeyError: The issue does not exist.
             WrongProjectError: The write targets an id from another project.
-            ValueError: ``if_held`` is not boolean, the expected holder is blank,
-                the issue is unassigned and ``if_held`` is false, or the claim
-                was concurrently released.
+            ValueError: ``override``/``revert_status`` is not boolean, no
+                expected holder is known (blank actor, no override), or the
+                issue is in a done-category status.
             ClaimConflictError: The issue is held by someone other than the
                 expected holder, or it is reassigned between read and write.
             InvalidTransitionError: The reverse status transition selected by
@@ -1659,18 +1716,21 @@ class IssuesMixin(DBMixinProtocol):
                 ``valid_transitions`` is attached when template context is
                 available.
         """
-        if not isinstance(if_held, bool):
-            msg = "if_held must be a boolean"
+        if not isinstance(override, bool):
+            msg = "override must be a boolean"
             raise ValueError(msg)
         if not isinstance(revert_status, bool):
             msg = "revert_status must be a boolean"
             raise ValueError(msg)
-        expected_holder: str | None = None
-        if if_held:
-            expected_holder = _normalize_assignee(actor if expected_assignee is None else expected_assignee)
-            if not expected_holder:
-                msg = "expected_assignee or actor is required when if_held=True"
-                raise ValueError(msg)
+        explicit_holder = _normalize_assignee(expected_assignee) if expected_assignee is not None else None
+        if expected_assignee is not None and not explicit_holder:
+            msg = "expected_assignee must be a non-empty string"
+            raise ValueError(msg)
+        actor_holder = _normalize_assignee(actor)
+        expected_holder = explicit_holder if explicit_holder is not None else actor_holder
+        if not override and not expected_holder:
+            msg = "actor (or expected_assignee) is required to release a claim"
+            raise ValueError(msg)
         self._check_id_prefix(issue_id)
         row = self.conn.execute("SELECT type, status, assignee, fields FROM issues WHERE id = ?", (issue_id,)).fetchone()
         if row is None:
@@ -1678,18 +1738,16 @@ class IssuesMixin(DBMixinProtocol):
             raise KeyError(msg)
         observed = row["assignee"] or ""
         if not observed:
-            if if_held:
-                return self.get_issue(issue_id)
-            msg = f"Cannot release {issue_id}: no assignee set"
-            raise ValueError(msg)
+            return None
         if self._resolve_status_category(row["type"], row["status"]) == "done":
-            if if_held:
-                return self.get_issue(issue_id)
             msg = f"Cannot release {issue_id}: status '{row['status']}' is done-category; assignee is closure audit trail"
             raise ValueError(msg)
-        if if_held and observed != expected_holder:
+        if (explicit_holder is not None or not override) and observed != expected_holder:
             msg = f"Cannot release {issue_id}: assigned to '{observed}' (expected '{expected_holder}')"
-            raise ClaimConflictError(issue_id, observed=observed, expected=expected_holder or "", message=msg)
+            raise ClaimConflictError(issue_id, observed=observed, expected=expected_holder, message=msg)
+        # Only a release that actually needed the coordinator bypass is recorded
+        # as one; an override by the holder itself is an ordinary release.
+        released_by_override = override and observed != actor_holder
 
         target: str | None = None
         if revert_status:
@@ -1763,17 +1821,12 @@ class IssuesMixin(DBMixinProtocol):
                 raise KeyError(msg)
             new_assignee = current["assignee"] or ""
             if not new_assignee:
-                if if_held:
-                    return self.get_issue(issue_id)
-                msg = f"Cannot release {issue_id}: already released"
-                raise ValueError(msg)
-            if if_held:
-                msg = f"Cannot release {issue_id}: assigned to '{new_assignee}' (expected '{expected_holder}')"
-                raise ClaimConflictError(issue_id, observed=new_assignee, expected=expected_holder or "", message=msg)
+                return None
             msg = f"Cannot release {issue_id}: reassigned to '{new_assignee}' (expected '{observed}')"
             raise ClaimConflictError(issue_id, observed=new_assignee, expected=observed, message=msg)
 
-        self._record_event(issue_id, "released", actor=actor, old_value=observed, comment=reason.strip())
+        release_event: EventType = "released_by_override" if released_by_override else "released"
+        self._record_event(issue_id, release_event, actor=actor, old_value=observed, comment=reason.strip())
         if target is not None:
             self._record_event(issue_id, "transition_forced", actor=actor, old_value=row["status"], new_value=target)
             self._record_event(issue_id, "status_changed", actor=actor, old_value=row["status"], new_value=target)
@@ -1793,7 +1846,7 @@ class IssuesMixin(DBMixinProtocol):
 
         Discovers all issues whose ``assignee == actor`` (optionally narrowed
         by ``label`` and/or ``label_prefix``) and releases each via
-        ``release_claim(if_held=True)``. Done-category issues are skipped —
+        the holder-checked ``release_claim``. Done-category issues are skipped —
         a closed issue still carries assignee for audit but isn't an active
         claim, and releasing it would clobber the audit signal that ``X
         closed this``.
@@ -1854,11 +1907,12 @@ class IssuesMixin(DBMixinProtocol):
                 result = self.release_claim(
                     issue.id,
                     actor=normalized_actor,
-                    if_held=True,
                     revert_status=revert_status,
                     reason=reason,
                 )
-                released.append(result)
+                # None: released concurrently since discovery — nothing held.
+                if result is not None:
+                    released.append(result)
             except WrongProjectError:
                 raise
             except (ValueError, KeyError) as exc:
@@ -2113,21 +2167,76 @@ class IssuesMixin(DBMixinProtocol):
         priority_min: int | None = None,
         priority_max: int | None = None,
         actor: str = "",
+        client_request_id: str | None = None,
     ) -> Issue | None:
         """Claim the highest-priority ready issue matching filters.
 
         Iterates ready issues sorted by priority and attempts claim_issue()
         on each until one succeeds (handles race conditions with retry).
         Returns None if no matching ready issues exist.
+
+        Retry-safe (MCP F4): if ``assignee`` already holds a live (non-done)
+        claim, or ``client_request_id`` matches a prior claim by ``assignee``
+        that it still holds, that issue is returned with
+        ``already_holding=True`` and nothing is written — a retried call never
+        claims a second issue and strands the first for the lease.
         """
+        if not assignee or not assignee.strip():
+            msg = "Assignee cannot be empty"
+            raise ValueError(msg)
+        client_request_id = _validate_client_request_id(client_request_id)
+        held = self._find_held_claim(_normalize_assignee(assignee), client_request_id=client_request_id, wip_only=False)
+        if held is not None:
+            return held
         result = self._claim_next_with_prior(
             assignee,
             type_filter=type_filter,
             priority_min=priority_min,
             priority_max=priority_max,
             actor=actor,
+            client_request_id=client_request_id,
         )
         return result[0] if result is not None else None
+
+    def _find_held_claim(self, assignee: str, *, client_request_id: str | None, wip_only: bool) -> Issue | None:
+        """Return the claim a retried claim-next/start-next call is handed back.
+
+        First a ``client_request_id`` replay: the issue whose ``claimed`` event
+        by ``assignee`` carries that id, if ``assignee`` still holds it (a
+        released or closed issue is no longer "your next work"). Otherwise the
+        most recently claimed live claim ``assignee`` holds — any non-done one
+        for ``claim_next``, wip-category only (in-progress work) for
+        ``start_next_work`` (``wip_only``). Read-only. The returned issue has
+        ``already_holding`` set.
+        """
+        if not assignee:
+            return None
+        rows = self.conn.execute(
+            "SELECT id, type, status FROM issues WHERE assignee = ? ORDER BY claimed_at DESC, id DESC",
+            (assignee,),
+        ).fetchall()
+        live = [r for r in rows if self._resolve_status_category(r["type"], r["status"]) != "done"]
+        chosen: str | None = None
+        if client_request_id is not None and live:
+            live_ids = [r["id"] for r in live]
+            id_ph = ",".join("?" * len(live_ids))
+            replay = self.conn.execute(
+                f"SELECT issue_id FROM events WHERE event_type = 'claimed' AND new_value = ? AND comment = ? "
+                f"AND issue_id IN ({id_ph}) ORDER BY id DESC LIMIT 1",
+                (assignee, _client_request_comment(client_request_id), *live_ids),
+            ).fetchone()
+            if replay is not None:
+                chosen = replay["issue_id"]
+        if chosen is None:
+            for r in live:
+                if not wip_only or self._resolve_status_category(r["type"], r["status"]) == "wip":
+                    chosen = r["id"]
+                    break
+        if chosen is None:
+            return None
+        held = self.get_issue(chosen)
+        held.already_holding = True
+        return held
 
     def _claim_next_with_prior(
         self,
@@ -2137,6 +2246,7 @@ class IssuesMixin(DBMixinProtocol):
         priority_min: int | None = None,
         priority_max: int | None = None,
         actor: str = "",
+        client_request_id: str | None = None,
         _skip_begin: bool = False,
     ) -> tuple[Issue, str] | None:
         """Internal: claim_next that also returns the candidate's prior assignee.
@@ -2173,7 +2283,13 @@ class IssuesMixin(DBMixinProtocol):
                     raise _ClaimCandidateVanishedError(issue.id)
                 prior_assignee = row["assignee"] or ""
                 try:
-                    claimed = self.claim_issue(issue.id, assignee=assignee, actor=actor or assignee, _skip_begin=_skip_begin)
+                    claimed = self.claim_issue(
+                        issue.id,
+                        assignee=assignee,
+                        actor=actor or assignee,
+                        client_request_id=client_request_id,
+                        _skip_begin=_skip_begin,
+                    )
                 except ClaimConflictError:
                     raise
                 except KeyError as exc:
@@ -2258,9 +2374,18 @@ class IssuesMixin(DBMixinProtocol):
         target_status: str | None = None,
         actor: str = "",
         advance: bool = False,
+        client_request_id: str | None = None,
     ) -> Issue | None:
         """Claim the highest-priority ready issue (filtered) and atomically
         transition it to a working status.
+
+        Retry-safe (MCP F4): if ``assignee`` already holds an in-progress
+        (wip-category) claim, or ``client_request_id`` matches a prior claim
+        by ``assignee`` that it still holds, that issue is returned with
+        ``already_holding=True`` and nothing is written — a retried call never
+        claims a second issue and strands the first for the lease. The held
+        claim is returned regardless of the type/priority filters: the filters
+        choose new work, they do not hide work already in hand.
 
         Candidate discovery (``get_ready``) and per-candidate target
         resolution run lock-free; only the per-candidate claim+transition
@@ -2283,6 +2408,10 @@ class IssuesMixin(DBMixinProtocol):
             msg = "Assignee cannot be empty"
             raise ValueError(msg)
         actor = actor or assignee
+        client_request_id = _validate_client_request_id(client_request_id)
+        held = self._find_held_claim(_normalize_assignee(assignee), client_request_id=client_request_id, wip_only=True)
+        if held is not None:
+            return held
 
         # Discover candidates outside any writer transaction.
         ready = self.get_ready()
@@ -2332,6 +2461,7 @@ class IssuesMixin(DBMixinProtocol):
                     assignee=assignee,
                     target_path=this_path,
                     actor=actor,
+                    client_request_id=client_request_id,
                 )
             except _StartCandidateUnclaimableError as exc:
                 # Race / status mismatch / deleted — try next candidate.
@@ -2401,6 +2531,7 @@ class IssuesMixin(DBMixinProtocol):
         target_path: list[str],
         actor: str,
         commit: str | None = None,
+        client_request_id: str | None = None,
     ) -> Issue:
         """Private critical section for ``start_work`` / ``start_next_work``.
 
@@ -2430,7 +2561,14 @@ class IssuesMixin(DBMixinProtocol):
         ``severity`` warning from the ``triage -> confirmed`` hop (filigree-406e6b7ee0).
         """
         try:
-            result = self.claim_issue(issue_id, assignee=assignee, actor=actor, commit=commit, _skip_begin=True)
+            result = self.claim_issue(
+                issue_id,
+                assignee=assignee,
+                actor=actor,
+                commit=commit,
+                client_request_id=client_request_id,
+                _skip_begin=True,
+            )
         except (ClaimConflictError, KeyError) as exc:
             raise _StartCandidateUnclaimableError(issue_id) from exc
         except ValueError as exc:

@@ -43,8 +43,10 @@ from filigree.types.api import (
     IssueDeletionRefusedError,
     IssueWithChangedFields,
     IssueWithTransitions,
+    NoOpResponse,
     PublicIssue,
     SlimIssue,
+    StartNextWorkResponse,
     TransitionDetail,
     claim_conflict_envelope,
     classify_release_claim_error,
@@ -557,6 +559,8 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                 "Atomically claim an open-category issue, or an unassigned wip-category issue released for handoff, "
                 "by setting assignee (optimistic locking). "
                 "Does NOT change status — use issue_update to advance through workflow after claiming. "
+                "Retry-safe: if the assignee already holds a live claim, that issue is returned with "
+                "already_holding=true instead of claiming a second one. "
                 "Identity: provide assignee or actor — whichever is omitted defaults from the other."
             ),
             inputSchema={
@@ -591,23 +595,25 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                 "predecessor of the current wip status (e.g. in_progress→open for task, fixing→confirmed "
                 "for bug); types with no open predecessor fall back to initial_state. Pass "
                 "revert_status=false to keep the legacy behaviour and leave the status unchanged. "
-                "By default this is strict and only succeeds if the issue has an assignee. "
-                "Pass if_held=true for release-if-held cleanup: unassigned issues are a no-op, "
-                "and assigned issues are only released when held by expected_assignee or, if omitted, actor."
+                "Holder-checked: the issue must be held by expected_assignee or, if omitted, actor — a claim held "
+                "by anyone else returns CONFLICT and is left alone. To free a peer's stale claim use work_reclaim "
+                "(holder-checked transfer); override=true is the coordinator release and is recorded as a "
+                "released_by_override event. Releasing an issue nobody holds is an idempotent "
+                '{"result": "no_op", "reason": "not_claimed"}.'
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "issue_id": {"type": "string", "description": "Issue ID to release"},
-                    "actor": {"type": "string", "description": "Agent/user identity for audit trail"},
-                    "if_held": {
-                        "type": "boolean",
-                        "default": False,
-                        "description": "Idempotent release-if-held mode; unassigned issues are returned unchanged.",
-                    },
+                    "actor": {"type": "string", "description": "Agent/user identity for audit trail; the expected holder by default"},
                     "expected_assignee": {
                         "type": "string",
-                        "description": "Only release when the current assignee matches this value; defaults to actor in if_held mode.",
+                        "description": "Expected current holder; defaults to actor. A mismatch returns CONFLICT, even with override.",
+                    },
+                    "override": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Coordinator release of a claim actor does not hold; recorded as released_by_override.",
                     },
                     "reason": {"type": "string", "description": "Audit reason for releasing the claim."},
                     "revert_status": {
@@ -629,7 +635,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                 "Bulk-release every live claim held by ``actor`` in one call — designed for "
                 "end-of-session cleanup. Discovers all issues whose assignee == actor "
                 "(optionally narrowed by ``label`` and/or ``label_prefix``), then releases "
-                "each via work_release(if_held=True). Done-category issues are skipped "
+                "each via the holder-checked work_release. Done-category issues are skipped "
                 "(their assignee is audit trail, not a live claim). Returns "
                 "BatchResponse[SlimIssue] with succeeded[] (released) and failed[] "
                 "(per-issue errors). Pair this with the ``cluster:*`` label convention: "
@@ -755,6 +761,8 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
             description=(
                 "Claim the highest-priority open-category ready issue by setting assignee. "
                 "Does NOT change status — use issue_update to advance through workflow after claiming. "
+                "Retry-safe: if the assignee already holds a live claim, that issue is returned with "
+                "already_holding=true instead of claiming a second one. "
                 "Identity: provide assignee or actor — whichever is omitted defaults from the other."
             ),
             inputSchema={
@@ -776,6 +784,14 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                     "actor": {
                         "type": "string",
                         "description": "Agent/user identity for audit trail (defaults to assignee)",
+                    },
+                    "client_request_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": (
+                            "Caller-chosen idempotency key for this request. A retry with the same id by the same "
+                            "assignee returns the issue that request claimed (already_holding=true) if still held."
+                        ),
                     },
                 },
             },
@@ -837,6 +853,8 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                 "Candidates that are ready but not single-hop startable (e.g. triage bugs) are skipped; pass advance=true "
                 "to make them startable via the multi-hop soft walk. "
                 "Returns the transitioned issue, or {status: 'empty'} when no ready issue matches. "
+                "Retry-safe: if the assignee already holds an in-progress claim, that issue is returned with "
+                "already_holding=true instead of starting a second one. "
                 "Identity: provide assignee or actor — whichever is omitted defaults from the other."
             ),
             inputSchema={
@@ -871,6 +889,14 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                         "description": (
                             "Walk soft transitions to wip so multi-hop types (e.g. triage bugs) become startable "
                             "instead of skipped. Default false."
+                        ),
+                    },
+                    "client_request_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": (
+                            "Caller-chosen idempotency key for this request. A retry with the same id by the same "
+                            "assignee returns the issue that request claimed (already_holding=true) if still held."
                         ),
                     },
                 },
@@ -1425,9 +1451,9 @@ async def _handle_release_claim(arguments: dict[str, Any]) -> list[TextContent]:
     actor, actor_err = _validate_actor(args.get("actor", "mcp"))
     if actor_err:
         return actor_err
-    if_held = args.get("if_held", False)
-    if not isinstance(if_held, bool):
-        return _text(ErrorResponse(error="if_held must be a boolean", code=ErrorCode.VALIDATION))
+    override = args.get("override", False)
+    if not isinstance(override, bool):
+        return _text(ErrorResponse(error="override must be a boolean", code=ErrorCode.VALIDATION))
     expected_assignee = args.get("expected_assignee")
     if expected_assignee is not None and not isinstance(expected_assignee, str):
         return _text(ErrorResponse(error="expected_assignee must be a string", code=ErrorCode.VALIDATION))
@@ -1442,11 +1468,13 @@ async def _handle_release_claim(arguments: dict[str, Any]) -> list[TextContent]:
         issue = tracker.release_claim(
             args["issue_id"],
             actor=actor,
-            if_held=if_held,
             expected_assignee=expected_assignee,
+            override=override,
             reason=reason,
             revert_status=revert_status,
         )
+        if issue is None:
+            return _text(NoOpResponse(result="no_op", reason="not_claimed"))
         refresh_summary()
         return _text(issue_to_public(issue))
     except KeyError:
@@ -1660,15 +1688,18 @@ async def _handle_claim_next(arguments: dict[str, Any]) -> list[TextContent]:
             priority_min=priority_min,
             priority_max=priority_max,
             actor=actor,
+            client_request_id=args.get("client_request_id"),
         )
     except ValueError as e:
         return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
     if claimed is None:
         return _text(ClaimNextEmptyResponse(status="empty", reason="No ready issues matching filters"))
-    refresh_summary()
+    if not claimed.already_holding:
+        refresh_summary()
     result = ClaimNextResponse(
         **issue_to_public(claimed),
         selection_reason=claimed.format_claim_next_reason(),
+        already_holding=claimed.already_holding,
     )
     return _text(result)
 
@@ -1859,6 +1890,7 @@ async def _handle_start_next_work(arguments: dict[str, Any]) -> list[TextContent
             target_status=args.get("target_status"),
             actor=actor,
             advance=advance,
+            client_request_id=args.get("client_request_id"),
         )
     except (AmbiguousTransitionError, InvalidTransitionError) as e:
         return _text(ErrorResponse(error=str(e), code=ErrorCode.INVALID_TRANSITION))
@@ -1867,5 +1899,6 @@ async def _handle_start_next_work(arguments: dict[str, Any]) -> list[TextContent
         return _text(ErrorResponse(error=msg, code=classify_value_error(msg)))
     if claimed is None:
         return _text(ClaimNextEmptyResponse(status="empty", reason="No ready issues matching filters"))
-    refresh_summary()
-    return _text(issue_to_public(claimed))
+    if not claimed.already_holding:
+        refresh_summary()
+    return _text(StartNextWorkResponse(**issue_to_public(claimed), already_holding=claimed.already_holding))

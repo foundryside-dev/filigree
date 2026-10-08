@@ -241,7 +241,7 @@ filigree close <id1> <id2> <id3>                # Close multiple at once
 filigree close <id> --reason="Fixed in commit abc123"
 filigree reopen <id>
 filigree reopen <id1> <id2>                     # Reopen multiple at once
-filigree undo <id>                          # Undo last reversible action
+filigree undo <id> --expected-event-id <n>  # Undo last reversible action (n from `filigree events <id>`)
 ```
 
 `update --json` returns the full issue projection. Soft workflow enforcement
@@ -318,10 +318,16 @@ before closure. Reopen clears `closed_at` and stale close-only fields such as
 ### `undo`
 
 Undo the most recent reversible action on an issue. Covers status, title, priority, assignee, description, notes, claims, and dependency changes.
+`--expected-event-id` is required: the id of the event to reverse (from `filigree events <id>`). If it is not the
+newest reversible event the command returns `CONFLICT` with `details.latest_event_id` and changes nothing, so a
+retried undo never reverses a second event. If another actor holds a live claim on the issue the command returns
+`CONFLICT` with `details.holder` unless `--override`. Nothing left to undo is a no-op (exit 0).
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `id` | string | Issue ID (positional) |
+| `--expected-event-id` | integer | Id of the event to reverse (required) |
+| `--override` | flag | Coordinator undo of an issue whose live claim another actor holds |
 
 ## Listing and Search
 
@@ -506,17 +512,18 @@ Claim the highest-priority ready issue.
 
 ### `release`
 
-Release a claimed issue by clearing its assignee without changing status. By default this is strict: releasing an
-unassigned issue returns a conflict. Use `--if-held` for idempotent cleanup flows; it no-ops when the issue is
-already unassigned and only clears a live claim held by `--expected-assignee`, or by the global `--actor` when no
-expected assignee is provided. If another actor holds the claim, the command returns `CONFLICT`; do not treat that
-as a cleanup no-op.
+Release a claim you hold by clearing its assignee. Holder-checked: the claim must be held by `--expected-assignee`,
+or by the global `--actor` when no expected assignee is provided; if another actor holds it the command returns
+`CONFLICT` and leaves the claim alone. Releasing an issue nobody holds is an idempotent no-op (exit 0;
+`--json` prints `{"result": "no_op", "reason": "not_claimed"}`). To take over a peer's stale claim use `reclaim`;
+`--override` is the coordinator release, recorded as `released_by_override`. (`--if-held` was removed in 3.4.0:
+its behaviour is now the default.)
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `id` | string | Issue ID (positional) |
-| `--if-held` | flag | Idempotent release-if-held mode |
-| `--expected-assignee` | string | Expected current assignee for `--if-held` coordinator flows |
+| `--override` | flag | Coordinator release of a claim `--actor` does not hold |
+| `--expected-assignee` | string | Expected current holder; defaults to the global `--actor` |
 | `--reason` | string | Audit reason recorded on the release event |
 
 ### `release-my-claims`
