@@ -190,19 +190,24 @@ def test_scan_ingest_response_weft_concrete_shape() -> None:
     from ``NotRequired`` to *required* in the subclass, exposing an
     impossible contract for scan ingestion (which never unblocks issues).
 
-    Pin the concrete shape: exactly four required keys, ``succeeded``
-    typed as ``list[str]``, no ``newly_unblocked``.
+    Pin the concrete shape: ``succeeded`` typed as ``list[str]``, the
+    per-finding ``failed`` / ``unchanged`` lists, no ``newly_unblocked``.
     """
-    from filigree.generations.weft.types import ScanIngestResponseWeft, ScanStats
+    from filigree.generations.weft.types import ScanFindingFailureWeft, ScanIngestResponseWeft, ScanStats, ScanUnchangedWeft
 
     hints = get_type_hints(ScanIngestResponseWeft)
     # ``weft_reasons`` is the one additive (NotRequired) field: a PDR-0023
     # weft-reason carrier list, omitted on the clean path so a same-scheme
     # client sees the byte-identical 4-key envelope. It must stay OPTIONAL —
     # promoting it to required would break every clean-scan consumer.
-    assert set(hints.keys()) == {"succeeded", "failed", "stats", "warnings", "weft_reasons"}
+    assert set(hints.keys()) == {"succeeded", "failed", "unchanged", "stats", "warnings", "weft_reasons"}
     assert hints["succeeded"] == list[str]
-    assert hints["failed"] == list[BatchFailure]
+    # HTTP F2: per-finding failures are addressed by request index, not an id, so
+    # they are NOT ``BatchFailure`` (whose ``code`` is the closed ``ErrorCode``).
+    assert hints["failed"] == list[ScanFindingFailureWeft]
+    assert hints["unchanged"] == list[ScanUnchangedWeft]
+    assert set(get_type_hints(ScanFindingFailureWeft)) == {"index", "fingerprint", "code", "reason"}
+    assert get_type_hints(ScanFindingFailureWeft)["code"] is str  # open vocabulary, never an enum
     assert hints["stats"] is ScanStats
     assert hints["warnings"] == list[str]
     # newly_unblocked must NOT appear — scan ingest cannot unblock issues.
@@ -218,6 +223,7 @@ def test_scan_ingest_response_weft_concrete_shape() -> None:
     assert ScanIngestResponseWeft.__required_keys__ == {
         "succeeded",
         "failed",
+        "unchanged",
         "stats",
         "warnings",
         "weft_reasons",

@@ -49,6 +49,9 @@ logger = logging.getLogger(__name__)
 
 _MAX_MIN_FINDINGS = 2_147_483_647
 _MAX_SCAN_FINDINGS_PER_REQUEST = 1000
+# ``ScanIngestResult`` keys that exist only on the weft wire; the frozen classic
+# envelope strips them (see ``api_scan_results``).
+_WEFT_ONLY_SCAN_RESULT_KEYS = frozenset({"weft_reasons", "failed", "unchanged", "requested", "applied"})
 _MAX_SCANNED_PATHS_PER_REQUEST = 100_000
 _MAX_SCAN_FINDING_TEXT_LENGTH = 20_000
 _SCAN_FINDING_TEXT_FIELDS = frozenset({"path", "rule_id", "message", "severity", "language", "suggestion", "fingerprint"})
@@ -666,7 +669,9 @@ def create_classic_router() -> APIRouter:
         # emits there), so a classic caller never declares fingerprint_scheme
         # and this list is always empty here. Strip it to keep the classic
         # response byte-identical to its pinned shape.
-        classic_result = {k: v for k, v in result.items() if k != "weft_reasons"}
+        # The per-finding outcome keys (HTTP F2: ``failed``/``unchanged``/
+        # ``requested``/``applied``) are weft-only additions for the same reason.
+        classic_result = {k: v for k, v in result.items() if k not in _WEFT_ONLY_SCAN_RESULT_KEYS}
         return JSONResponse(classic_result)
 
     @router.get("/scan-runs")

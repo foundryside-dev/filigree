@@ -109,6 +109,24 @@ policy (ADR-030) records this as its one pre-4.0 exception.
   the count). Known gap: the count includes kind-less rows that the strict
   `kind=defect` hint filter omits. `session-context` now accepts the global
   `--actor` (or `FILIGREE_ACTOR`). No schema change.
+- **`POST /api/weft/scan-results` reports per-finding outcomes (HTTP F2).**
+  `failed[]` is now populated: each entry is `{index, fingerprint, code,
+  reason}` (`index` is the finding's position in the request array,
+  `fingerprint` is `null` when the finding carried none). Today a finding
+  dropped by the registry's per-path body cap is reported as `OVER_CAP`; before,
+  it appeared only as free text in `warnings[]` under HTTP 200. The code
+  vocabulary is open (documented: `OVER_CAP`, `VALIDATION`, `SCHEME_MISMATCH`;
+  `KIND_NOT_ACCEPTED` follows) and `VALIDATION` / `SCHEME_MISMATCH` are reserved:
+  a malformed finding still rejects the whole batch with HTTP 400, and a scheme
+  mismatch is still carried batch-level by `weft_reasons`. A replayed batch now
+  lists findings it matched to an identical stored row under a new additive
+  `unchanged: [{id, reason: "already_present"}]` instead of a bare
+  `succeeded: []`; `succeeded` remains the newly-created ids. `stats` gains
+  `requested` (findings in the request) and `applied` (created + updated).
+  `warnings[]` stays operator text. Additive on the wire: Wardline's client
+  already maps unknown per-finding failure codes to `rejected`
+  (`_normalize_failure_reason`). The frozen classic `POST /api/v1/scan-results`
+  envelope is unchanged. No schema change.
 
 ### Removed
 

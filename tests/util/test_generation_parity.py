@@ -261,7 +261,12 @@ class TestClassicGenerationParityScanResults:
 # ---------------------------------------------------------------------------
 
 
-_WEFT_SCAN_RESULTS_EXAMPLES = _examples_for("weft", "scan-results")
+# An example may carry ``"replayable": false`` when the live replay cannot
+# reproduce its precondition (e.g. a Loomweave BODY_TOO_LARGE over-cap drop); it
+# is then bound to the live handler by a purpose-built test instead (the example's
+# ``replay_note`` names it). ``setup_requests`` are POSTed first, unasserted, to
+# establish state the example depends on (e.g. a replay needs a stored finding).
+_WEFT_SCAN_RESULTS_EXAMPLES = [e for e in _examples_for("weft", "scan-results") if e.get("replayable", True)]
 
 
 @pytest.mark.asyncio
@@ -281,6 +286,9 @@ class TestWeftGenerationParityScanResults:
         dashboard_surface: AsyncClient,
         example: dict[str, Any],
     ) -> None:
+        for setup in example.get("setup_requests", []):
+            setup_resp = await dashboard_surface.request(setup["method"], setup["path"], json=setup["body"])
+            assert setup_resp.status_code < 400, f"{example['name']}: setup request failed: {setup_resp.text!r}"
         req = example["request"]
         expected_resp = example["response"]
         resp = await dashboard_surface.request(req["method"], req["path"], json=req["body"])

@@ -49,7 +49,7 @@ from filigree.types.core import (
     make_issue_id,
     make_loomweave_entity_id,
 )
-from filigree.types.files import ScanIngestResult, WeftReason
+from filigree.types.files import ScanFindingFailure, ScanIngestResult, ScanUnchangedFinding, WeftReason
 
 if TYPE_CHECKING:
     from filigree.registry import ResolvedFile
@@ -71,6 +71,21 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 INGESTED_FILE_ID_KEY = "_filigree_ingested_file_id"
+
+# Per-finding failure codes surfaced in ``ScanIngestResult["failed"]`` (HTTP F2).
+# The wire vocabulary is OPEN (``ScanFindingFailure.code`` is a plain ``str``):
+# a later producer-facing code (e.g. ``KIND_NOT_ACCEPTED``, Task 0.5a) is added
+# without touching a closed enum. Documented members:
+#   OVER_CAP         -- finding dropped by the registry's per-path body cap
+#                       (emitted by the ingest today).
+#   VALIDATION       -- malformed finding. Reserved: ``_validate_scan_findings``
+#                       is fail-closed, so a malformed finding rejects the WHOLE
+#                       batch with HTTP 400 (ErrorCode.VALIDATION) before any write.
+#   SCHEME_MISMATCH  -- fingerprint scheme differs from the store's. Reserved:
+#                       the mismatch is batch-level and its findings are still
+#                       ingested, so it is carried by ``weft_reasons``
+#                       (PDR-0023), not per-finding.
+SCAN_FAILURE_OVER_CAP = "OVER_CAP"
 
 # ---------------------------------------------------------------------------
 # Constants for file-domain validation
@@ -1294,6 +1309,22 @@ class FilesMixin(DBMixinProtocol):
             stats["warnings"].append(warning)
         if skipped_paths and {f["path"] for f in findings} <= skipped_paths:
             raise RegistryResolutionError(_batch_error_message(body_too_large[0]), status_code=400, url="")
+        # Per-finding structured report of the drop (HTTP F2): the warning above
+        # is operator text; ``failed`` is what a producer switches on. ``index``
+        # is the position in the REQUEST so the producer can map it back.
+        # Recorded here (pre-lock, once) rather than in the write window, which
+        # ``@_retry_busy`` may re-run.
+        reasons = {err["requested_path"]: f"{err['code']}: {err['message']}" for err in body_too_large}
+        for index, f in enumerate(findings):
+            if f["path"] in skipped_paths:
+                stats["failed"].append(
+                    ScanFindingFailure(
+                        index=index,
+                        fingerprint=f.get("fingerprint") or None,
+                        code=SCAN_FAILURE_OVER_CAP,
+                        reason=f"finding dropped, file path exceeds the registry's per-path body cap ({reasons[f['path']]})",
+                    )
+                )
         return _ScanFileResolutions(resolved=batch["resolved"], skipped_paths=frozenset(skipped_paths))
 
     def _upsert_finding(
@@ -1340,7 +1371,8 @@ class FilesMixin(DBMixinProtocol):
             # it follows the finding across line moves, so identity is keyed on
             # (scan_source, fingerprint) alone, not file/rule/line.
             existing_finding = self.conn.execute(
-                "SELECT id, seen_count, scan_run_id, issue_id, status FROM scan_findings WHERE scan_source = ? AND fingerprint = ?",
+                "SELECT id, seen_count, scan_run_id, issue_id, status, file_id, message, severity, suggestion, "
+                "line_start, line_end, metadata FROM scan_findings WHERE scan_source = ? AND fingerprint = ?",
                 (scan_source, fingerprint),
             ).fetchone()
         else:
@@ -1348,7 +1380,8 @@ class FilesMixin(DBMixinProtocol):
             # without a fingerprint never collides with a fingerprint-bearing
             # row that happens to share the same site (matches the partial index).
             existing_finding = self.conn.execute(
-                "SELECT id, seen_count, scan_run_id, issue_id, status FROM scan_findings "
+                "SELECT id, seen_count, scan_run_id, issue_id, status, file_id, message, severity, suggestion, "
+                "line_start, line_end, metadata FROM scan_findings "
                 "WHERE file_id = ? AND scan_source = ? AND rule_id = ? "
                 "AND coalesce(line_start, -1) = ? AND fingerprint = ''",
                 (file_id, scan_source, rule_id, dedup_line),
@@ -1360,6 +1393,21 @@ class FilesMixin(DBMixinProtocol):
             # issue post-commit (finding→issue regress cascade).
             prior_status = existing_finding["status"]
             linked_issue_id = existing_finding["issue_id"]
+            # A replay: the stored row already equals what this batch submits.
+            # Reported as ``unchanged`` so the producer can tell "already
+            # present" from "landed nothing". A row whose content differs (or
+            # that regresses fixed -> open) is a genuine update, not unchanged.
+            if (
+                prior_status not in ("fixed", "unseen_in_latest")
+                and existing_finding["file_id"] == file_id
+                and existing_finding["message"] == f.get("message", "")
+                and existing_finding["severity"] == severity
+                and existing_finding["suggestion"] == suggestion
+                and existing_finding["line_start"] == line_start
+                and existing_finding["line_end"] == f.get("line_end")
+                and existing_finding["metadata"] == json.dumps(f.get("metadata") or {})
+            ):
+                stats["unchanged"].append(ScanUnchangedFinding(id=existing_finding["id"], reason="already_present"))
             self._update_existing_finding(
                 existing_finding=existing_finding,
                 f=f,
@@ -1681,6 +1729,10 @@ class FilesMixin(DBMixinProtocol):
             observations_failed=0,
             warnings=warnings,
             weft_reasons=[],
+            failed=[],
+            unchanged=[],
+            requested=len(findings),
+            applied=0,
         )
         regressed_issue_ids: set[str] = set()
         # (finding_id, issue_id) pairs whose finding genuinely transitioned to
@@ -1749,6 +1801,7 @@ class FilesMixin(DBMixinProtocol):
             resolved=resolved,
             scanned_paths=scanned_paths,
         )
+        stats["applied"] = stats["findings_created"] + stats["findings_updated"]
 
         # Post-commit finding→issue cascade: reopen issues whose linked finding
         # just regressed to ``open``. Runs OUTSIDE the ingest transaction (each
@@ -1865,6 +1918,9 @@ class FilesMixin(DBMixinProtocol):
         stats["observations_created"] = 0
         stats["observations_failed"] = 0
         stats["new_finding_ids"] = []
+        # ``unchanged`` is accumulated in this window, so it resets with the rest.
+        # ``failed`` is NOT reset: it is recorded pre-lock (like ``warnings``).
+        stats["unchanged"] = []
         # Reset on every entry so a @_retry_busy re-run after a rolled-back
         # transient SQLITE_BUSY does not double-accumulate regressed/resolved issues.
         regressed_issue_ids.clear()

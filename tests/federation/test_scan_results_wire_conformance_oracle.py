@@ -139,6 +139,14 @@ def test_real_intake_persists_and_round_trips_golden(tmp_path: Path) -> None:
         # Every wire finding was ingested (none dropped at the boundary).
         assert result["findings_created"] == len(golden["findings"])
 
+        # HTTP F2: the per-finding outcome keys are REQUIRED on the ingest result
+        # (the weft adapter lifts them onto the wire), and a clean first ingest of
+        # Wardline's golden reports nothing failed or replayed.
+        assert result["failed"] == []
+        assert result["unchanged"] == []
+        assert result["requested"] == len(golden["findings"])
+        assert result["applied"] == result["findings_created"] + result["findings_updated"] == len(golden["findings"])
+
         # The full population round-trips through the project-wide query the
         # ``/api/weft/findings`` route serves. ``suppression="all"`` keeps the
         # suppressed rows (baselined/waived) in the count.
@@ -230,5 +238,35 @@ def test_real_intake_round_trips_suppression_and_kind_axes(tmp_path: Path) -> No
         for kind, count in expected_kind.items():
             got = db.list_findings_global(kind=kind, suppression="all", limit=1000)
             assert got["total"] == count, f"kind={kind!r}: expected {count}, got {got['total']}"
+    finally:
+        db.close()
+
+
+def test_replayed_golden_reports_every_finding_unchanged(tmp_path: Path) -> None:
+    """Re-POSTing Wardline's golden is a pure replay: every finding is reported ``unchanged``.
+
+    The golden is fingerprint-keyed, so the second ingest matches each stored row
+    by ``(scan_source, fingerprint)`` with identical content. The producer must be
+    able to tell that from a batch that landed nothing: ``new_finding_ids`` is
+    empty, ``unchanged`` lists every previously-created id, and ``requested`` /
+    ``applied`` still account for the whole batch.
+    """
+    golden = load_golden(GOLDEN_PATH)
+    first_parsed = _parse_scan_results_body(golden)
+    assert isinstance(first_parsed, dict)
+
+    db = FiligreeDB(tmp_path / "filigree.db", prefix="test")
+    db.initialize()
+    try:
+        first = db.process_scan_results(**first_parsed)
+        replay_parsed = _parse_scan_results_body(load_golden(GOLDEN_PATH))
+        assert isinstance(replay_parsed, dict)
+        replay = db.process_scan_results(**replay_parsed)
+
+        assert replay["new_finding_ids"] == []
+        assert replay["failed"] == []
+        assert replay["unchanged"] == [{"id": fid, "reason": "already_present"} for fid in first["new_finding_ids"]]
+        assert replay["requested"] == len(first["new_finding_ids"])
+        assert replay["applied"] == replay["findings_updated"] == replay["requested"]
     finally:
         db.close()

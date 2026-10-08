@@ -11,7 +11,7 @@ from httpx import AsyncClient
 
 import filigree.dashboard_routes.files as files_routes
 from filigree.core import FiligreeDB
-from filigree.registry import RegistryFileNotFoundError, RegistryUnavailableError, ResolvedFile
+from filigree.registry import LOOMWEAVE_BATCH_BODY_TOO_LARGE_CODE, RegistryFileNotFoundError, RegistryUnavailableError, ResolvedFile
 from tests.conftest import PopulatedDB
 
 _OLD_TS = "2020-01-01T00:00:00+00:00"  # well past any clean-stale cutoff
@@ -122,6 +122,140 @@ class TestScanResultsPayloadLimits:
             "limit": 1000,
             "actual": 1001,
             "chunking_guidance": "Split larger scan output into multiple POST /api/weft/scan-results requests.",
+        }
+
+
+class TestScanResultsPerFindingOutcomes:
+    """HTTP F2: ``failed[]`` / ``unchanged[]`` / ``stats.requested|applied`` on the weft wire.
+
+    Over-cap drops used to be free text in ``warnings[]`` under HTTP 200 and a replayed
+    batch came back as a bare ``succeeded: []``; producers could not tell what landed.
+    """
+
+    _OVER_CAP_PATH = "src/too_big_for_the_registry.py"
+
+    @staticmethod
+    def _over_cap_registry() -> object:
+        from tests.core.test_scan_ingest_registry import _ErrorChannelRegistry
+
+        return _ErrorChannelRegistry(
+            code=LOOMWEAVE_BATCH_BODY_TOO_LARGE_CODE,
+            error_paths={TestScanResultsPerFindingOutcomes._OVER_CAP_PATH},
+        )
+
+    @classmethod
+    def _mixed_findings(cls) -> list[dict[str, object]]:
+        return [
+            {"path": "src/ok_one.py", "rule_id": "R1", "severity": "low", "message": "m1", "fingerprint": "fp-ok-1"},
+            {"path": cls._OVER_CAP_PATH, "rule_id": "R2", "severity": "low", "message": "m2", "fingerprint": "fp-big"},
+            {"path": "src/ok_two.py", "rule_id": "R3", "severity": "low", "message": "m3"},
+            {"path": cls._OVER_CAP_PATH, "rule_id": "R4", "severity": "low", "message": "m4"},
+        ]
+
+    @pytest.mark.parametrize("path", ["/api/weft/scan-results", "/api/scan-results"])
+    async def test_over_cap_drop_reported_in_failed_not_only_warnings(
+        self, client: AsyncClient, dashboard_db: PopulatedDB, path: str
+    ) -> None:
+        dashboard_db.db.registry = self._over_cap_registry()  # type: ignore[assignment]
+
+        resp = await client.post(path, json={"scan_source": "wardline", "findings": self._mixed_findings()})
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert len(body["failed"]) == 2
+        assert {entry["code"] for entry in body["failed"]} == {"OVER_CAP"}
+        # The operator text is kept alongside the structured failure.
+        assert any("not ingested" in w for w in body["warnings"])
+        # The neighbours still landed; the dropped rows are NOT in succeeded.
+        assert len(body["succeeded"]) == 2
+        assert body["stats"]["requested"] == 4
+        assert body["stats"]["applied"] == 2
+        assert body["stats"]["findings_created"] == 2
+
+    async def test_over_cap_example_matches_live_response(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        """Binds the non-replayable fixture example to the live handler (fake over-cap registry)."""
+        from tests.util.test_generation_parity import _assert_shape_matches
+
+        example = next(
+            e for e in json.loads(_SCAN_RESULTS_FIXTURE.read_text())["examples"] if e["name"] == "partial_over_cap_drop_reports_failed"
+        )
+        over_cap_path = example["request"]["body"]["findings"][1]["path"]
+        from tests.core.test_scan_ingest_registry import _ErrorChannelRegistry
+
+        dashboard_db.db.registry = _ErrorChannelRegistry(code=LOOMWEAVE_BATCH_BODY_TOO_LARGE_CODE, error_paths={over_cap_path})  # type: ignore[assignment]
+
+        resp = await client.post(example["request"]["path"], json=example["request"]["body"])
+
+        assert resp.status_code == example["response"]["status"]
+        body = resp.json()
+        _assert_shape_matches(body, example["response"]["body"], path=example["name"])
+        expected_failed = example["response"]["body"]["failed"][0]
+        assert body["failed"][0]["index"] == expected_failed["index"]
+        assert body["failed"][0]["fingerprint"] == expected_failed["fingerprint"]
+        assert body["failed"][0]["code"] == expected_failed["code"]
+        assert body["stats"]["requested"] == example["response"]["body"]["stats"]["requested"]
+        assert body["stats"]["applied"] == example["response"]["body"]["stats"]["applied"]
+
+    async def test_failed_entries_carry_index_and_code(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        dashboard_db.db.registry = self._over_cap_registry()  # type: ignore[assignment]
+
+        resp = await client.post("/api/weft/scan-results", json={"scan_source": "wardline", "findings": self._mixed_findings()})
+
+        failed = resp.json()["failed"]
+        assert [set(entry) for entry in failed] == [{"index", "fingerprint", "code", "reason"}] * 2
+        # ``index`` is the finding's position in the REQUEST array, not in the survivors.
+        assert [entry["index"] for entry in failed] == [1, 3]
+        assert [entry["fingerprint"] for entry in failed] == ["fp-big", None]
+        assert all(entry["code"] == "OVER_CAP" and entry["reason"] for entry in failed)
+
+    @pytest.mark.parametrize("path", ["/api/weft/scan-results", "/api/scan-results"])
+    async def test_replayed_batch_reports_unchanged(self, client: AsyncClient, path: str) -> None:
+        findings = [
+            {"path": "src/a.py", "rule_id": "R1", "severity": "low", "message": "m", "fingerprint": "fp-a"},
+            {"path": "src/b.py", "rule_id": "R2", "severity": "low", "message": "m", "fingerprint": "fp-b"},
+        ]
+        first = (await client.post(path, json={"scan_source": "wardline", "findings": findings})).json()
+        assert len(first["succeeded"]) == 2
+        assert first["unchanged"] == []
+        assert first["stats"]["requested"] == 2
+        assert first["stats"]["applied"] == 2
+
+        replay = (await client.post(path, json={"scan_source": "wardline", "findings": findings})).json()
+
+        assert replay["succeeded"] == []
+        assert replay["unchanged"] == [{"id": fid, "reason": "already_present"} for fid in first["succeeded"]]
+        assert replay["failed"] == []
+        assert replay["stats"]["requested"] == 2
+        assert replay["stats"]["findings_created"] == 0
+        assert replay["stats"]["findings_updated"] == 2
+        assert replay["stats"]["applied"] == 2
+
+    async def test_changed_finding_is_updated_not_unchanged(self, client: AsyncClient) -> None:
+        finding = {"path": "src/a.py", "rule_id": "R1", "severity": "low", "message": "old", "fingerprint": "fp-a"}
+        first = (await client.post("/api/weft/scan-results", json={"scan_source": "wardline", "findings": [finding]})).json()
+
+        edited = dict(finding, message="new message")
+        second = (await client.post("/api/weft/scan-results", json={"scan_source": "wardline", "findings": [edited]})).json()
+
+        assert second["unchanged"] == []
+        assert second["stats"]["findings_updated"] == 1
+        assert second["stats"]["applied"] == 1
+        assert first["succeeded"]
+
+    async def test_classic_scan_results_response_is_unchanged(self, client: AsyncClient) -> None:
+        """The frozen classic envelope must not grow the weft-only per-finding keys."""
+        finding = {"path": "src/a.py", "rule_id": "R1", "severity": "low", "message": "m", "fingerprint": "fp-a"}
+        resp = await client.post("/api/v1/scan-results", json={"scan_source": "wardline", "findings": [finding]})
+
+        assert set(resp.json()) == {
+            "files_created",
+            "files_updated",
+            "findings_created",
+            "findings_updated",
+            "new_finding_ids",
+            "observations_created",
+            "observations_failed",
+            "warnings",
         }
 
 

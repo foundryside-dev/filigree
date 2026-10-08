@@ -56,6 +56,38 @@ class ScanStats(TypedDict):
     findings_updated: int
     observations_created: int
     observations_failed: int
+    #: ``len(findings)`` in the request (HTTP F2).
+    requested: int
+    #: ``findings_created + findings_updated``: findings the ingest applied.
+    #: ``requested - applied`` is what was dropped (itemised in ``failed``).
+    applied: int
+
+
+class ScanFindingFailureWeft(TypedDict):
+    """One per-finding ingest failure on the scan-results wire (HTTP F2).
+
+    Deliberately NOT ``BatchFailure``: scan findings have no id until they are
+    accepted, so the entry is addressed by ``index`` (position in the request
+    ``findings`` array) plus ``fingerprint`` (``None`` when the finding carried
+    none). ``code`` is an OPEN vocabulary -- consumers must treat an unknown
+    code as a generic rejection (Wardline maps them to ``rejected``). Documented
+    members: ``OVER_CAP`` (dropped by the registry's per-path body cap),
+    ``VALIDATION`` (malformed finding), ``SCHEME_MISMATCH`` (fingerprint scheme
+    differs from the store's); ``KIND_NOT_ACCEPTED`` is added by Task 0.5a.
+    ``reason`` is human-readable operator text.
+    """
+
+    index: int
+    fingerprint: str | None
+    code: str
+    reason: str
+
+
+class ScanUnchangedWeft(TypedDict):
+    """A replayed finding: already stored with identical content (``reason`` is ``already_present``)."""
+
+    id: str
+    reason: str
 
 
 class BatchCloseResponseWeft(TypedDict):
@@ -400,11 +432,15 @@ class ScanIngestResponseWeft(TypedDict):
     """Response shape for ``POST /api/weft/scan-results``.
 
     ``succeeded`` contains server-generated finding ids for newly-created
-    findings (classic called this ``new_finding_ids``). ``failed`` is
-    always present as an empty list in 2.0; populated once per-finding
-    ingest failure tracking lands (non-breaking addition). ``stats`` and
-    ``warnings`` are weft-specific additions on top of the batch
-    envelope.
+    findings (classic called this ``new_finding_ids``). ``failed`` lists
+    findings the ingest dropped, one ``ScanFindingFailureWeft`` per finding
+    (``index`` / ``fingerprint`` / ``code`` / ``reason``); it is empty on a
+    fully-applied batch. ``unchanged`` lists findings that were already stored
+    with identical content (a replayed batch), so a replay is distinguishable
+    from a batch that landed nothing. ``stats`` (now carrying ``requested`` and
+    ``applied``) and ``warnings`` are weft-specific additions on top of the
+    batch envelope; ``warnings`` is operator text only -- machine-readable
+    outcomes live in ``failed`` / ``unchanged``.
 
     Declared as a concrete ``TypedDict`` rather than subclassing
     ``BatchResponse[str]``: at runtime, TypedDict + ``Generic`` does not
@@ -419,7 +455,8 @@ class ScanIngestResponseWeft(TypedDict):
     """
 
     succeeded: list[str]
-    failed: list[BatchFailure]
+    failed: list[ScanFindingFailureWeft]
+    unchanged: list[ScanUnchangedWeft]
     stats: ScanStats
     warnings: list[str]
     #: Structured weft-reason carriers for non-clean ingest outcomes (PDR-0023,
