@@ -24,6 +24,7 @@ from filigree.core import (
     VALID_SUPPRESSION_FILTERS,
     VALID_WARDLINE_FINDING_KINDS,
     FiligreeDB,
+    read_scan_ingest_accept_kinds,
 )
 from filigree.dashboard_routes.common import (
     _MAX_PAGINATION_LIMIT,
@@ -51,7 +52,7 @@ _MAX_MIN_FINDINGS = 2_147_483_647
 _MAX_SCAN_FINDINGS_PER_REQUEST = 1000
 # ``ScanIngestResult`` keys that exist only on the weft wire; the frozen classic
 # envelope strips them (see ``api_scan_results``).
-_WEFT_ONLY_SCAN_RESULT_KEYS = frozenset({"weft_reasons", "failed", "unchanged", "requested", "applied"})
+_WEFT_ONLY_SCAN_RESULT_KEYS = frozenset({"weft_reasons", "failed", "unchanged", "requested", "applied", "rejected_by_kind"})
 _MAX_SCANNED_PATHS_PER_REQUEST = 100_000
 _MAX_SCAN_FINDING_TEXT_LENGTH = 20_000
 _SCAN_FINDING_TEXT_FIELDS = frozenset({"path", "rule_id", "message", "severity", "language", "suggestion", "fingerprint"})
@@ -355,6 +356,118 @@ def _parse_scan_results_body(body: dict[str, Any]) -> dict[str, Any] | _ScanResu
 # ---------------------------------------------------------------------------
 
 
+def _files_schema_payload(db: FiligreeDB) -> dict[str, Any]:
+    """API discovery payload for ``GET /api/files/_schema`` (classic) and its weft twin.
+
+    ``accept_kinds`` (Stage 0, Task 0.5a) is the project's effective
+    ``scan_ingest.accept_kinds``: a producer pre-flighting this endpoint uses its
+    PRESENCE to detect that the ingest rejects telemetry kinds and that the
+    ``mark_unseen`` sweep never flips stored telemetry rows.
+    """
+    schema = {
+        "valid_severities": sorted(VALID_SEVERITIES),
+        "valid_finding_statuses": sorted(VALID_FINDING_STATUSES),
+        "valid_association_types": sorted(VALID_ASSOC_TYPES),
+        # FIL-2/X-5: the nested wardline finding-filter axes, advertised so a
+        # federation consumer can discover them without reading source.
+        "valid_finding_kinds": sorted(VALID_WARDLINE_FINDING_KINDS),
+        "valid_suppression_filters": sorted(VALID_SUPPRESSION_FILTERS),
+        "valid_file_sort_fields": ["first_seen", "language", "path", "updated_at"],
+        "valid_finding_sort_fields": ["severity", "updated_at"],
+        "config_flags": {
+            "registry_backend": db.registry_backend,
+            "registry_backend_features": list(REGISTRY_BACKEND_FEATURES),
+            "allow_local_fallback": db.allow_local_fallback,
+            "loomweave_instance_id": db.loomweave_instance_id,
+            "loomweave_api_version": db.loomweave_api_version,
+            "loomweave_instance_rotated": db.loomweave_instance_rotated,
+        },
+        "scan_results_limits": _scan_results_limits_payload(),
+        # Stage 0 (Task 0.5a): the wardline finding kinds the scan ingest accepts
+        # (``["*"]`` = every kind, the 3.3 behaviour). Read fresh per request.
+        "accept_kinds": list(read_scan_ingest_accept_kinds(db.meta_dir)),
+        "endpoints": [
+            {
+                "method": "POST",
+                "path": "/api/v1/scan-results",
+                "description": "Ingest scan results",
+                "status": "live",
+                "request_body": {
+                    "scan_source": "string (required)",
+                    "findings": "array (required)",
+                    "scan_run_id": (
+                        "string (optional). Send a globally unique non-empty scan_run_id when this POST should appear "
+                        "in /api/scan-runs history; empty is accepted for fire-and-forget findings and intentionally excluded."
+                    ),
+                    "mark_unseen": "boolean (optional)",
+                    "create_observations": "boolean (optional, default false)",
+                    "complete_scan_run": "boolean (optional, default true)",
+                    "max_findings_per_request": _MAX_SCAN_FINDINGS_PER_REQUEST,
+                    "max_scanned_paths_per_request": _MAX_SCANNED_PATHS_PER_REQUEST,
+                    "max_finding_text_length": _MAX_SCAN_FINDING_TEXT_LENGTH,
+                    "chunking_guidance": _SCAN_RESULTS_CHUNKING_GUIDANCE,
+                },
+            },
+            {"method": "GET", "path": "/api/files", "description": "List tracked files", "status": "live"},
+            {
+                "method": "GET",
+                "path": "/api/files/{file_id}",
+                "description": "Get file details",
+                "status": "live",
+            },
+            {
+                "method": "GET",
+                "path": "/api/files/{file_id}/findings",
+                "description": "Findings for a specific file",
+                "status": "live",
+            },
+            {
+                "method": "PATCH",
+                "path": "/api/files/{file_id}/findings/{finding_id}",
+                "description": "Update finding status/linkage",
+                "status": "live",
+            },
+            {
+                "method": "GET",
+                "path": "/api/files/{file_id}/timeline",
+                "description": "Merged event timeline for a file",
+                "status": "live",
+            },
+            {
+                "method": "GET",
+                "path": "/api/files/hotspots",
+                "description": "Files ranked by weighted finding severity",
+                "status": "live",
+            },
+            {
+                "method": "POST",
+                "path": "/api/files/{file_id}/associations",
+                "description": "Link a file to an issue",
+                "status": "live",
+            },
+            {
+                "method": "GET",
+                "path": "/api/files/stats",
+                "description": "Global findings severity stats",
+                "status": "live",
+            },
+            {
+                "method": "GET",
+                "path": "/api/scan-runs",
+                "description": "Scan run history (grouped by scan_run_id)",
+                "status": "live",
+            },
+            {
+                "method": "GET",
+                "path": "/api/files/_schema",
+                "description": "API discovery (this endpoint)",
+                "status": "live",
+            },
+        ],
+    }
+    return schema
+
+
 def create_classic_router() -> APIRouter:
     """Build the classic-generation APIRouter for file tracking and scan
     findings endpoints.
@@ -418,105 +531,7 @@ def create_classic_router() -> APIRouter:
     @router.get("/files/_schema")
     async def api_files_schema(db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
         """API discovery: valid enum values and endpoint catalog for file/scan features."""
-        schema = {
-            "valid_severities": sorted(VALID_SEVERITIES),
-            "valid_finding_statuses": sorted(VALID_FINDING_STATUSES),
-            "valid_association_types": sorted(VALID_ASSOC_TYPES),
-            # FIL-2/X-5: the nested wardline finding-filter axes, advertised so a
-            # federation consumer can discover them without reading source.
-            "valid_finding_kinds": sorted(VALID_WARDLINE_FINDING_KINDS),
-            "valid_suppression_filters": sorted(VALID_SUPPRESSION_FILTERS),
-            "valid_file_sort_fields": ["first_seen", "language", "path", "updated_at"],
-            "valid_finding_sort_fields": ["severity", "updated_at"],
-            "config_flags": {
-                "registry_backend": db.registry_backend,
-                "registry_backend_features": list(REGISTRY_BACKEND_FEATURES),
-                "allow_local_fallback": db.allow_local_fallback,
-                "loomweave_instance_id": db.loomweave_instance_id,
-                "loomweave_api_version": db.loomweave_api_version,
-                "loomweave_instance_rotated": db.loomweave_instance_rotated,
-            },
-            "scan_results_limits": _scan_results_limits_payload(),
-            "endpoints": [
-                {
-                    "method": "POST",
-                    "path": "/api/v1/scan-results",
-                    "description": "Ingest scan results",
-                    "status": "live",
-                    "request_body": {
-                        "scan_source": "string (required)",
-                        "findings": "array (required)",
-                        "scan_run_id": (
-                            "string (optional). Send a globally unique non-empty scan_run_id when this POST should appear "
-                            "in /api/scan-runs history; empty is accepted for fire-and-forget findings and intentionally excluded."
-                        ),
-                        "mark_unseen": "boolean (optional)",
-                        "create_observations": "boolean (optional, default false)",
-                        "complete_scan_run": "boolean (optional, default true)",
-                        "max_findings_per_request": _MAX_SCAN_FINDINGS_PER_REQUEST,
-                        "max_scanned_paths_per_request": _MAX_SCANNED_PATHS_PER_REQUEST,
-                        "max_finding_text_length": _MAX_SCAN_FINDING_TEXT_LENGTH,
-                        "chunking_guidance": _SCAN_RESULTS_CHUNKING_GUIDANCE,
-                    },
-                },
-                {"method": "GET", "path": "/api/files", "description": "List tracked files", "status": "live"},
-                {
-                    "method": "GET",
-                    "path": "/api/files/{file_id}",
-                    "description": "Get file details",
-                    "status": "live",
-                },
-                {
-                    "method": "GET",
-                    "path": "/api/files/{file_id}/findings",
-                    "description": "Findings for a specific file",
-                    "status": "live",
-                },
-                {
-                    "method": "PATCH",
-                    "path": "/api/files/{file_id}/findings/{finding_id}",
-                    "description": "Update finding status/linkage",
-                    "status": "live",
-                },
-                {
-                    "method": "GET",
-                    "path": "/api/files/{file_id}/timeline",
-                    "description": "Merged event timeline for a file",
-                    "status": "live",
-                },
-                {
-                    "method": "GET",
-                    "path": "/api/files/hotspots",
-                    "description": "Files ranked by weighted finding severity",
-                    "status": "live",
-                },
-                {
-                    "method": "POST",
-                    "path": "/api/files/{file_id}/associations",
-                    "description": "Link a file to an issue",
-                    "status": "live",
-                },
-                {
-                    "method": "GET",
-                    "path": "/api/files/stats",
-                    "description": "Global findings severity stats",
-                    "status": "live",
-                },
-                {
-                    "method": "GET",
-                    "path": "/api/scan-runs",
-                    "description": "Scan run history (grouped by scan_run_id)",
-                    "status": "live",
-                },
-                {
-                    "method": "GET",
-                    "path": "/api/files/_schema",
-                    "description": "API discovery (this endpoint)",
-                    "status": "live",
-                },
-            ],
-        }
-        return JSONResponse(schema, headers={"Cache-Control": "max-age=3600"})
+        return JSONResponse(_files_schema_payload(db), headers={"Cache-Control": "max-age=3600"})
 
     @router.get("/files/{file_id}")
     async def api_get_file(file_id: str, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
@@ -713,6 +728,15 @@ def create_weft_router() -> APIRouter:
     from filigree.scanners import list_scanners
 
     router = APIRouter()
+
+    @router.get("/files/_schema")
+    async def api_weft_files_schema(db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+        """API discovery for file/scan features (same payload as the classic route).
+
+        Mounted on the weft generation so a weft-only producer can discover the
+        scan-ingest contract (incl. ``accept_kinds``) without a classic hop.
+        """
+        return JSONResponse(_files_schema_payload(db), headers={"Cache-Control": "max-age=3600"})
 
     @router.post("/scan-results")
     async def api_weft_scan_results(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:

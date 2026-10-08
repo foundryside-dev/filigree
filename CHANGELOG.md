@@ -61,6 +61,14 @@ policy (ADR-030) records this as its one pre-4.0 exception.
   (prompted at a TTY, defaulting to `product-use` with a logged warning
   otherwise) or `filigree config set population <value>`, shown as
   `POPULATION:` in the session-context banner. No schema change.
+- **`GET /api/files/_schema` advertises `accept_kinds` (Stage 0).** The
+  response gains a top-level `accept_kinds: [...]` — the project's effective
+  `scan_ingest.accept_kinds` (`["defect"]` by default, `["*"]` when the 3.3
+  behaviour is restored). A producer that pre-flights this endpoint (Wardline
+  does) uses the key's presence to tell that this Filigree rejects telemetry
+  kinds and never sweeps stored telemetry rows, and so that a defects-only
+  emit is safe. The same payload is now also served at
+  `GET /api/weft/files/_schema`. Additive.
 
 ### Changed
 
@@ -115,8 +123,8 @@ policy (ADR-030) records this as its one pre-4.0 exception.
   `fingerprint` is `null` when the finding carried none). Today a finding
   dropped by the registry's per-path body cap is reported as `OVER_CAP`; before,
   it appeared only as free text in `warnings[]` under HTTP 200. The code
-  vocabulary is open (documented: `OVER_CAP`, `VALIDATION`, `SCHEME_MISMATCH`;
-  `KIND_NOT_ACCEPTED` follows) and `VALIDATION` / `SCHEME_MISMATCH` are reserved:
+  vocabulary is open (documented: `OVER_CAP`, `VALIDATION`, `SCHEME_MISMATCH`,
+  `KIND_NOT_ACCEPTED`; see the Stage 0 entry below) and `VALIDATION` / `SCHEME_MISMATCH` are reserved:
   a malformed finding still rejects the whole batch with HTTP 400, and a scheme
   mismatch is still carried batch-level by `weft_reasons`. A replayed batch now
   lists findings it matched to an identical stored row under a new additive
@@ -127,6 +135,27 @@ policy (ADR-030) records this as its one pre-4.0 exception.
   already maps unknown per-finding failure codes to `rejected`
   (`_normalize_failure_reason`). The frozen classic `POST /api/v1/scan-results`
   envelope is unchanged. No schema change.
+- **Scan ingest accepts defect findings only by default; the sweep never
+  flips telemetry (Stage 0).** A finding whose `metadata.wardline.kind` is a
+  telemetry kind (`fact`, `classification`, `metric`, `suggestion`), or whose
+  path is Wardline's `<engine>` pseudo-path, is no longer stored as a finding.
+  It is rejected per-finding in `failed[]` with `code: "KIND_NOT_ACCEPTED"`
+  (reason `telemetry kinds are not work; see Stage 0`) and counted in the new
+  `stats.rejected_by_kind`; the rest of the batch is ingested and the call
+  still returns 200. A finding with no kind, a malformed kind or an unknown
+  kind is treated as a defect and accepted. Independently of the setting, the
+  `mark_unseen` sweep never moves a stored telemetry row to
+  `unseen_in_latest`, so a producer that stops emitting telemetry does not
+  close previously stored telemetry rows (or their linked issues) as fixed. Telemetry
+  rows that are already stored are left as they are. To restore the 3.3
+  behaviour (store every kind, `<engine>` rows included), set
+  `"scan_ingest": {"accept_kinds": ["*"]}` in `.weft/filigree/config.json`; a
+  list such as `["defect", "fact"]` accepts just those kinds. A malformed
+  setting falls back to `["defect"]`. `finding_report` (MCP/CLI) now returns a
+  `VALIDATION` error for a telemetry-kind finding instead of a misleading
+  "not found after ingestion". The classic `POST /api/v1/scan-results`
+  envelope applies the same policy but does not gain the new keys. No schema
+  change.
 
 ### Removed
 

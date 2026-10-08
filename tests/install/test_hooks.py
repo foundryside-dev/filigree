@@ -33,6 +33,7 @@ from filigree.install import (
     install_codex_skills,
     install_skills,
 )
+from tests._db_factory import set_scan_ingest_accept_kinds
 from tests.conftest import PopulatedDB
 
 
@@ -200,6 +201,8 @@ class TestBuildContext:
         defect is already-accepted (not counted), engine telemetry (kind:metric)
         is counted separately as "not work", kind-less findings count as
         defect-signal, and a promoted (bridged) finding is excluded."""
+        # Telemetry rows model a pre-Stage-0 ingest: opt back in to every kind.
+        set_scan_ingest_accept_kinds(db, ["*"])
         db.process_scan_results(
             scan_source="wardline",
             findings=[

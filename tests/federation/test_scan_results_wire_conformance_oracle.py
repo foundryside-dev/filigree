@@ -29,6 +29,12 @@ the suppression-filter oracle (``test_suppression_filter_conformance_oracle.py``
   intake, not the golden against itself: if Filigree's parser rejected a field
   the wire carries, or the ingest dropped/garbled a finding or its nested
   axes, this reds.
+- **Stage 0 kind policy (Task 0.5a).** The golden carries Wardline telemetry
+  kinds (``fact`` / ``classification`` / ``metric`` / ``suggestion``) beside its
+  defects. The round-trip tests below are about the LEGACY full-population
+  intake, so they set ``scan_ingest.accept_kinds = ["*"]`` first;
+  ``test_default_policy_rejects_golden_telemetry_kinds`` pins that the default
+  policy rejects exactly the golden's non-defect rows per-finding.
 - **Layer 2 — drift recheck (release-gate, skip-clean).** Lives in
   ``test_sibling_drift.py`` (registry entry ``wardline_scan_results``):
   byte-compares the vendored copy against Wardline's authority source
@@ -53,6 +59,8 @@ from filigree.core import FiligreeDB
 # driving the real intake — the route adds only the HTTP envelope and the
 # worker-thread hop, not any parsing/persistence logic of its own.
 from filigree.dashboard_routes.files import _parse_scan_results_body
+from filigree.db_files import NON_DEFECT_WARDLINE_FINDING_KINDS
+from tests._db_factory import set_scan_ingest_accept_kinds
 from tests.federation._oracle import blob_sha, load_golden
 
 pytestmark = pytest.mark.federation_contract
@@ -126,6 +134,8 @@ def test_real_intake_persists_and_round_trips_golden(tmp_path: Path) -> None:
     parsed = _parse_scan_results_body(golden)
     assert isinstance(parsed, dict)
 
+    # Legacy full-population intake: accept every wardline kind (Stage 0 opt-out).
+    set_scan_ingest_accept_kinds(tmp_path, ["*"])
     db = FiligreeDB(tmp_path / "filigree.db", prefix="test")
     db.initialize()
     try:
@@ -144,6 +154,7 @@ def test_real_intake_persists_and_round_trips_golden(tmp_path: Path) -> None:
         # Wardline's golden reports nothing failed or replayed.
         assert result["failed"] == []
         assert result["unchanged"] == []
+        assert result["rejected_by_kind"] == 0
         assert result["requested"] == len(golden["findings"])
         assert result["applied"] == result["findings_created"] + result["findings_updated"] == len(golden["findings"])
 
@@ -224,6 +235,8 @@ def test_real_intake_round_trips_suppression_and_kind_axes(tmp_path: Path) -> No
         if kind is not None:
             expected_kind[kind] = expected_kind.get(kind, 0) + 1
 
+    # Legacy full-population intake: accept every wardline kind (Stage 0 opt-out).
+    set_scan_ingest_accept_kinds(tmp_path, ["*"])
     db = FiligreeDB(tmp_path / "filigree.db", prefix="test")
     db.initialize()
     try:
@@ -255,6 +268,8 @@ def test_replayed_golden_reports_every_finding_unchanged(tmp_path: Path) -> None
     first_parsed = _parse_scan_results_body(golden)
     assert isinstance(first_parsed, dict)
 
+    # Legacy full-population intake: accept every wardline kind (Stage 0 opt-out).
+    set_scan_ingest_accept_kinds(tmp_path, ["*"])
     db = FiligreeDB(tmp_path / "filigree.db", prefix="test")
     db.initialize()
     try:
@@ -268,5 +283,46 @@ def test_replayed_golden_reports_every_finding_unchanged(tmp_path: Path) -> None
         assert replay["unchanged"] == [{"id": fid, "reason": "already_present"} for fid in first["new_finding_ids"]]
         assert replay["requested"] == len(first["new_finding_ids"])
         assert replay["applied"] == replay["findings_updated"] == replay["requested"]
+    finally:
+        db.close()
+
+
+def test_default_policy_rejects_golden_telemetry_kinds(tmp_path: Path) -> None:
+    """Under the default ``accept_kinds`` (``["defect"]``) the golden's telemetry rows are refused per-finding.
+
+    Expectations are DERIVED from the wire: every finding whose
+    ``metadata.wardline.kind`` is a non-defect kind (or whose path is the
+    ``<engine>`` pseudo-path) must come back in ``failed[]`` as
+    ``KIND_NOT_ACCEPTED`` at its request index, and only the defects persist.
+    """
+    golden = load_golden(GOLDEN_PATH)
+    parsed = _parse_scan_results_body(golden)
+    assert isinstance(parsed, dict)
+    golden = load_golden(GOLDEN_PATH)
+    telemetry_indices = [
+        index
+        for index, f in enumerate(golden["findings"])
+        if f["metadata"]["wardline"].get("kind") in NON_DEFECT_WARDLINE_FINDING_KINDS or f["path"] == "<engine>"
+    ]
+    # The golden must actually exercise the policy, or this test proves nothing.
+    assert telemetry_indices
+    assert len(telemetry_indices) < len(golden["findings"])
+
+    db = FiligreeDB(tmp_path / "filigree.db", prefix="test")
+    db.initialize()
+    try:
+        result = db.process_scan_results(**parsed)
+
+        assert [(f["index"], f["fingerprint"], f["code"]) for f in result["failed"]] == [
+            (index, golden["findings"][index]["fingerprint"], "KIND_NOT_ACCEPTED") for index in telemetry_indices
+        ]
+        assert result["rejected_by_kind"] == len(telemetry_indices)
+        assert result["requested"] == len(golden["findings"])
+        defects = len(golden["findings"]) - len(telemetry_indices)
+        assert result["findings_created"] == result["applied"] == defects
+        listed = db.list_findings_global(suppression="all", limit=1000)
+        assert listed["total"] == defects
+        for index in telemetry_indices:
+            assert db.find_finding_by_fingerprint(golden["scan_source"], golden["findings"][index]["fingerprint"]) is None
     finally:
         db.close()

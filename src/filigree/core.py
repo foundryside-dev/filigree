@@ -1443,6 +1443,41 @@ def read_population(filigree_dir: Path) -> str | None:
     return value if isinstance(value, str) and value in VALID_POPULATIONS else None
 
 
+# Stage 0 telemetry cut (Task 0.5a): which ``metadata.wardline.kind`` values the
+# scan ingest accepts. Stored as ``scan_ingest.accept_kinds`` in config.json (no
+# schema change). ``*`` (``db_files.SCAN_INGEST_ACCEPT_ALL_KINDS``) accepts every
+# kind AND the ``<engine>`` pseudo-path (the 3.3 behaviour); the default accepts
+# defects only, so engine telemetry is rejected per-finding instead of landing
+# as work. Advertised on ``GET /api/files/_schema`` as ``accept_kinds`` so a
+# producer can detect the guard.
+DEFAULT_SCAN_INGEST_ACCEPT_KINDS: tuple[str, ...] = ("defect",)
+
+
+def read_scan_ingest_accept_kinds(filigree_dir: Path) -> tuple[str, ...]:
+    """Return the effective ``scan_ingest.accept_kinds`` (sorted, de-duplicated).
+
+    Never raises: an absent, corrupt, or malformed setting (not a non-empty list
+    of non-empty strings) falls back to ``DEFAULT_SCAN_INGEST_ACCEPT_KINDS`` --
+    the guarded default, never the permissive one.
+    """
+    try:
+        section = read_config(filigree_dir).get("scan_ingest")
+    except (ValueError, TypeError, OSError):
+        return DEFAULT_SCAN_INGEST_ACCEPT_KINDS
+    if section is None:
+        return DEFAULT_SCAN_INGEST_ACCEPT_KINDS
+    kinds = section.get("accept_kinds") if isinstance(section, dict) else None
+    if not isinstance(kinds, list) or not kinds or not all(isinstance(k, str) and k for k in kinds):
+        logger.warning(
+            "config %s: scan_ingest.accept_kinds must be a non-empty list of strings, got %r; using %r",
+            filigree_dir / CONFIG_FILENAME,
+            section,
+            list(DEFAULT_SCAN_INGEST_ACCEPT_KINDS),
+        )
+        return DEFAULT_SCAN_INGEST_ACCEPT_KINDS
+    return tuple(sorted(set(kinds)))
+
+
 VALID_REGISTRY_BACKENDS: frozenset[RegistryBackend] = frozenset(cast("tuple[RegistryBackend, ...]", get_args(RegistryBackend)))
 
 

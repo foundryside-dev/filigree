@@ -128,6 +128,18 @@ class LoomweaveConfig(TypedDict, total=False):
     token_env: str
 
 
+class ScanIngestConfig(TypedDict, total=False):
+    """Stage 0 (Task 0.5a) scan-ingest policy, the ``scan_ingest`` key of config.json.
+
+    ``accept_kinds`` lists the ``metadata.wardline.kind`` values the ingest
+    accepts (default ``["defect"]``); ``["*"]`` accepts every kind and the
+    ``<engine>`` pseudo-path (the 3.3 behaviour). Read via
+    ``filigree.core.read_scan_ingest_accept_kinds``.
+    """
+
+    accept_kinds: list[str]
+
+
 class ProjectConfig(_ProjectConfigRequired, total=False):
     """Shape of .filigree/config.json.
 
@@ -141,6 +153,7 @@ class ProjectConfig(_ProjectConfigRequired, total=False):
     registry_backend: RegistryBackend
     loomweave: LoomweaveConfig
     population: str
+    scan_ingest: ScanIngestConfig
 
 
 _T = TypeVar("_T")

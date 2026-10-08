@@ -29,6 +29,7 @@ class TestScanIngestResultToWeft:
             unchanged=[],
             requested=0,
             applied=0,
+            rejected_by_kind=0,
         )
         weft = scan_ingest_result_to_weft(result)
 
@@ -49,6 +50,7 @@ class TestScanIngestResultToWeft:
             "observations_failed",
             "requested",
             "applied",
+            "rejected_by_kind",
         }
         assert all(weft["stats"][k] == 0 for k in weft["stats"])
 
@@ -66,6 +68,7 @@ class TestScanIngestResultToWeft:
             unchanged=[],
             requested=1,
             applied=1,
+            rejected_by_kind=0,
         )
         weft = scan_ingest_result_to_weft(result)
 
@@ -98,6 +101,7 @@ class TestScanIngestResultToWeft:
             unchanged=[],
             requested=0,
             applied=0,
+            rejected_by_kind=0,
         )
         weft = scan_ingest_result_to_weft(result)
         weft["succeeded"].append("sf_two")
@@ -108,6 +112,7 @@ class TestScanIngestResultToWeft:
     def test_failed_and_unchanged_populate_the_wire(self) -> None:
         """HTTP F2: per-finding failures and replays are surfaced, in independent lists."""
         failure = {"index": 2, "fingerprint": "fp-x", "code": "OVER_CAP", "reason": "too big"}
+        kind_failure = {"index": 0, "fingerprint": None, "code": "KIND_NOT_ACCEPTED", "reason": "telemetry kinds are not work; see Stage 0"}
         unchanged = {"id": "sf_old", "reason": "already_present"}
         result = ScanIngestResult(
             files_created=0,
@@ -118,17 +123,19 @@ class TestScanIngestResultToWeft:
             observations_created=0,
             observations_failed=0,
             warnings=["operator text"],
-            failed=[failure],
+            failed=[kind_failure, failure],
             unchanged=[unchanged],
             requested=3,
             applied=1,
+            rejected_by_kind=1,
         )
         weft = scan_ingest_result_to_weft(result)
 
-        assert weft["failed"] == [failure]
+        assert weft["failed"] == [kind_failure, failure]
         assert weft["unchanged"] == [unchanged]
         assert weft["stats"]["requested"] == 3
         assert weft["stats"]["applied"] == 1
+        assert weft["stats"]["rejected_by_kind"] == 1
         # Independent copies: mutating the wire must not leak back.
-        weft["failed"][0]["code"] = "MUTATED"
+        weft["failed"][1]["code"] = "MUTATED"
         assert failure["code"] == "OVER_CAP"

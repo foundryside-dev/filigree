@@ -358,7 +358,7 @@ def scan_ingest_result_to_weft(result: ScanIngestResult) -> ScanIngestResponseWe
       ``fingerprint`` / ``code`` / ``reason``); ``[]`` when nothing was
       dropped.
     - ``unchanged`` lists replayed findings (already stored, identical).
-    - ``requested`` / ``applied`` land in ``stats``.
+    - ``requested`` / ``applied`` / ``rejected_by_kind`` land in ``stats``.
     """
     response = ScanIngestResponseWeft(
         succeeded=list(result["new_finding_ids"]),
@@ -373,6 +373,7 @@ def scan_ingest_result_to_weft(result: ScanIngestResult) -> ScanIngestResponseWe
             observations_failed=result["observations_failed"],
             requested=result["requested"],
             applied=result["applied"],
+            rejected_by_kind=result["rejected_by_kind"],
         ),
         warnings=list(result["warnings"]),
     )

@@ -219,7 +219,9 @@ class ScanFindingFailure(TypedDict):
     when it carried none. ``code`` is an OPEN vocabulary: the documented members
     are ``OVER_CAP`` (dropped by the registry's per-path body cap),
     ``VALIDATION`` (malformed finding), ``SCHEME_MISMATCH`` (fingerprint scheme
-    differs from the store's) -- and ``KIND_NOT_ACCEPTED`` once Task 0.5a lands.
+    differs from the store's) and ``KIND_NOT_ACCEPTED`` (a wardline finding kind
+    the project's ``scan_ingest.accept_kinds`` does not accept, or an ``<engine>``
+    pseudo-path row -- Stage 0).
     Consumers must treat unknown codes as a generic rejection. ``reason`` is
     human-readable operator text.
     """
@@ -266,6 +268,10 @@ class ScanIngestResult(TypedDict):
     requested: int
     #: ``findings_created + findings_updated`` -- findings the ingest applied.
     applied: int
+    #: Findings rejected with ``KIND_NOT_ACCEPTED`` (Stage 0): their wardline
+    #: kind is not in ``scan_ingest.accept_kinds``, or their path is ``<engine>``.
+    #: Each is also itemised in ``failed``.
+    rejected_by_kind: int
 
 
 class EnrichedFileItem(FileRecordDict):

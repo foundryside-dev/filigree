@@ -8,6 +8,7 @@ import pytest
 
 from filigree.core import FiligreeDB
 from filigree.types.core import make_issue_id
+from tests._db_factory import set_scan_ingest_accept_kinds
 
 
 def _seed_findings(db: FiligreeDB) -> dict[str, str]:
@@ -215,7 +216,11 @@ def _seed_wardline_mix(db: FiligreeDB) -> None:
     Mirrors the live distribution (FIL-2/X-5): ``kind:metric`` rows drown the
     handful of real ``kind:defect`` rows, and a baselined defect must be
     excludable from the actionable view.
+
+    These read surfaces handle telemetry rows ALREADY stored by a pre-Stage-0
+    ingest, so the seed opts back in to every kind (``accept_kinds=["*"]``).
     """
+    set_scan_ingest_accept_kinds(db, ["*"])
     db.register_file("src/app.py", language="python")
     db.process_scan_results(
         scan_source="wardline",
@@ -479,6 +484,7 @@ class TestUnbridgedFindingStatsKindSplit:
         assert stats["actionable_other"] == 0
 
     def test_all_known_non_defect_kinds_count_as_other(self, db: FiligreeDB) -> None:
+        set_scan_ingest_accept_kinds(db, ["*"])  # legacy stored telemetry (pre-Stage-0 ingest)
         db.register_file("src/nd.py", language="python")
         kinds = ["classification", "fact", "metric", "suggestion"]
         db.process_scan_results(
@@ -513,6 +519,7 @@ class TestUnbridgedFindingStatsKindSplit:
     def test_suppressed_metric_counts_suppressed_only(self, db: FiligreeDB) -> None:
         """A baselined telemetry row increments ``suppressed`` only — it must
         not leak into either actionable_* bucket."""
+        set_scan_ingest_accept_kinds(db, ["*"])  # legacy stored telemetry (pre-Stage-0 ingest)
         db.register_file("src/sm.py", language="python")
         db.process_scan_results(
             scan_source="wardline",

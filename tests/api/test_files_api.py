@@ -12,6 +12,7 @@ from httpx import AsyncClient
 import filigree.dashboard_routes.files as files_routes
 from filigree.core import FiligreeDB
 from filigree.registry import LOOMWEAVE_BATCH_BODY_TOO_LARGE_CODE, RegistryFileNotFoundError, RegistryUnavailableError, ResolvedFile
+from tests._db_factory import set_scan_ingest_accept_kinds
 from tests.conftest import PopulatedDB
 
 _OLD_TS = "2020-01-01T00:00:00+00:00"  # well past any clean-stale cutoff
@@ -257,6 +258,89 @@ class TestScanResultsPerFindingOutcomes:
             "observations_failed",
             "warnings",
         }
+
+
+class TestScanResultsAcceptKinds:
+    """Stage 0 (Task 0.5a): non-defect wardline kinds are rejected per-finding on the wire.
+
+    Core behaviour (sweep guard, kind classification) is pinned in
+    ``tests/core/test_scan_ingest_accept_kinds.py``; this class pins the HTTP surfaces:
+    the ``failed[]`` / ``stats.rejected_by_kind`` wire shape and the ``accept_kinds``
+    advertisement producers pre-flight on ``GET <api_base>/files/_schema``.
+    """
+
+    _KIND_REASON = "telemetry kinds are not work; see Stage 0"
+
+    @staticmethod
+    def _findings() -> list[dict[str, object]]:
+        return [
+            {"path": "src/a.py", "rule_id": "R1", "message": "m1", "fingerprint": "fp-1", "metadata": {"wardline": {"kind": "defect"}}},
+            {"path": "src/a.py", "rule_id": "R2", "message": "m2", "fingerprint": "fp-2", "metadata": {"wardline": {"kind": "fact"}}},
+            {"path": "<engine>", "rule_id": "R3", "message": "m3", "metadata": {"wardline": {"kind": "metric"}}},
+        ]
+
+    @pytest.mark.parametrize("path", ["/api/weft/scan-results", "/api/scan-results"])
+    async def test_weft_wire_reports_kind_not_accepted(self, client: AsyncClient, path: str) -> None:
+        resp = await client.post(path, json={"scan_source": "wardline", "findings": self._findings()})
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["failed"] == [
+            {"index": 1, "fingerprint": "fp-2", "code": "KIND_NOT_ACCEPTED", "reason": self._KIND_REASON},
+            {"index": 2, "fingerprint": None, "code": "KIND_NOT_ACCEPTED", "reason": self._KIND_REASON},
+        ]
+        assert len(body["succeeded"]) == 1
+        assert body["stats"]["rejected_by_kind"] == 2
+        assert body["stats"]["requested"] == 3
+        assert body["stats"]["applied"] == 1
+
+    async def test_kind_not_accepted_example_values_match_live_response(self, client: AsyncClient) -> None:
+        """The generic parity replay checks only shape; pin the example's values here."""
+        example = next(
+            e for e in json.loads(_SCAN_RESULTS_FIXTURE.read_text())["examples"] if e["name"] == "partial_kind_not_accepted_reports_failed"
+        )
+
+        resp = await client.post(example["request"]["path"], json=example["request"]["body"])
+
+        assert resp.status_code == example["response"]["status"]
+        body = resp.json()
+        expected = example["response"]["body"]
+        assert body["failed"] == expected["failed"]
+        assert body["stats"] == expected["stats"]
+        assert len(body["succeeded"]) == len(expected["succeeded"])
+
+    async def test_star_restores_legacy_on_the_wire(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        set_scan_ingest_accept_kinds(dashboard_db.db, ["*"])
+
+        resp = await client.post("/api/weft/scan-results", json={"scan_source": "wardline", "findings": self._findings()})
+
+        body = resp.json()
+        assert body["failed"] == []
+        assert body["stats"]["rejected_by_kind"] == 0
+        assert len(body["succeeded"]) == 3
+
+    async def test_classic_envelope_does_not_grow_rejected_by_kind(self, client: AsyncClient) -> None:
+        resp = await client.post("/api/v1/scan-results", json={"scan_source": "wardline", "findings": self._findings()})
+
+        body = resp.json()
+        assert "rejected_by_kind" not in body
+        # The classic surface still applies the guard; it just cannot itemise it.
+        assert body["findings_created"] == 1
+
+    @pytest.mark.parametrize("schema_path", ["/api/files/_schema", "/api/weft/files/_schema"])
+    async def test_schema_advertises_accept_kinds(self, client: AsyncClient, dashboard_db: PopulatedDB, schema_path: str) -> None:
+        default = await client.get(schema_path)
+        assert default.status_code == 200
+        assert default.json()["accept_kinds"] == ["defect"]
+
+        set_scan_ingest_accept_kinds(dashboard_db.db, ["*"])
+        legacy = await client.get(schema_path)
+        assert legacy.json()["accept_kinds"] == ["*"]
+
+    async def test_weft_schema_matches_classic_schema(self, client: AsyncClient) -> None:
+        classic = (await client.get("/api/files/_schema")).json()
+        weft = (await client.get("/api/weft/files/_schema")).json()
+        assert weft == classic
 
 
 class TestScanResultsRegistryErrors:
@@ -552,6 +636,12 @@ class TestWeftFindingsKindSuppressionFilters:
     """FIL-2/X-5: GET /api/weft/findings honours the nested wardline axes
     (``kind``, ``suppression``) and ``rule_id``/``qualname`` so a federation
     consumer can pull only the real un-suppressed defects."""
+
+    @pytest.fixture(autouse=True)
+    def _legacy_accept_all_kinds(self, dashboard_db: PopulatedDB) -> None:
+        # These filters read telemetry rows stored by a pre-Stage-0 ingest, so the
+        # seed opts back in to every kind (Stage 0 rejects ``metric`` by default).
+        set_scan_ingest_accept_kinds(dashboard_db.db, ["*"])
 
     async def _seed(self, client: AsyncClient) -> None:
         resp = await client.post(

@@ -5,7 +5,9 @@ Importable by any conftest.py or test file in the test suite.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from typing import Any
 
 from filigree.core import (
     DB_FILENAME,
@@ -46,3 +48,19 @@ def make_db(
         )
     d.initialize()
     return d
+
+
+def set_scan_ingest_accept_kinds(db_or_dir: FiligreeDB | Path, kinds: list[str]) -> None:
+    """Write ``scan_ingest.accept_kinds`` into the project's config.json.
+
+    Accepts a ``FiligreeDB`` (writes to its ``meta_dir``) or the store dir
+    itself (for tests that construct the DB afterwards). ``["*"]`` restores the
+    pre-Stage-0 behaviour: every wardline finding kind is ingested.
+    """
+    meta_dir = db_or_dir.meta_dir if isinstance(db_or_dir, FiligreeDB) else db_or_dir
+    config_path = meta_dir / "config.json"
+    # Merge into the RAW file (not ``read_config``'s defaults-filled view) so a
+    # test DB without a config.json does not suddenly acquire a default prefix.
+    config: dict[str, Any] = json.loads(config_path.read_text()) if config_path.exists() else {}
+    config["scan_ingest"] = {"accept_kinds": list(kinds)}
+    write_config(meta_dir, config)

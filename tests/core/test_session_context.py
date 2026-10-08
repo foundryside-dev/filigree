@@ -13,6 +13,7 @@ from click.testing import CliRunner
 from filigree.cli import cli
 from filigree.core import FiligreeDB, find_filigree_anchor
 from filigree.hooks import READY_CAP, _build_context, resolve_session_actor
+from tests._db_factory import set_scan_ingest_accept_kinds
 
 
 @pytest.fixture(autouse=True)
@@ -129,6 +130,9 @@ def _wln(path: str, fp: str, **md: Any) -> dict[str, Any]:
 
 
 def test_banner_defect_count_and_hint_excludes_telemetry(db: FiligreeDB) -> None:
+    # The banner splits out telemetry rows ALREADY stored by a pre-Stage-0 ingest;
+    # opt back in to every kind so the seed can store them.
+    set_scan_ingest_accept_kinds(db, ["*"])
     db.process_scan_results(
         scan_source="wardline",
         findings=[

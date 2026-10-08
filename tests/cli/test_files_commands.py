@@ -49,6 +49,7 @@ from click.testing import CliRunner
 from filigree.cli import cli
 from filigree.registry import RegistryUnavailableError, ResolvedFile
 from filigree.types.core import make_issue_id
+from tests._db_factory import set_scan_ingest_accept_kinds
 from tests._seeds import SeededProject
 
 # ---------------------------------------------------------------------------
@@ -1590,6 +1591,8 @@ class TestListFindingsKindSuppression:
         os.chdir(str(project))
         try:
             with get_db() as db:
+                # Telemetry rows model a pre-Stage-0 ingest: opt back in to every kind.
+                set_scan_ingest_accept_kinds(db, ["*"])
                 db.register_file("src/app.py", language="python")
                 db.process_scan_results(
                     scan_source="wardline",

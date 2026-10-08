@@ -141,6 +141,14 @@ def report_scanner_finding(
         create_observations=create_observation,
         observation_actor=observation_actor,
     )
+    if result["failed"]:
+        # Stage 0: the single reported finding was refused per-finding (e.g. a
+        # wardline telemetry kind -> KIND_NOT_ACCEPTED). Surface it as caller-side
+        # invalid input (the MCP/CLI callers map ValueError to VALIDATION) rather
+        # than the misleading "not found after ingestion" lookup failure below.
+        failure = result["failed"][0]
+        msg = f"{failure['code']}: {failure['reason']}"
+        raise ValueError(msg)
     if refresh_summary is not None:
         refresh_summary(tracker)
     if line_warnings:
