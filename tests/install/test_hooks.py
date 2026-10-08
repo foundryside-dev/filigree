@@ -218,7 +218,7 @@ class TestBuildContext:
         assert "ANALYZER SIGNAL: 2 defect-signal finding(s) open (+1 telemetry rows, not work — see Task 0.5)" in result
         # N-4 (weft-993c1077e1): runnable hints are CLI commands; MCP verbs named alongside.
         assert "`filigree finding list --kind defect --status open`" in result
-        assert "finding_list kind=defect status=open limit=25" in result
+        assert "finding_list kind=defect status=open suppression=active limit=25" in result
         assert "`filigree finding promote`" in result
         assert "actionable" not in result
 

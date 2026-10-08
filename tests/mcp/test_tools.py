@@ -931,6 +931,25 @@ class TestTemplateAndSummary:
         assert "STATS:" in text
         assert "Project Pulse" not in text
 
+    async def test_session_context_scopes_claims_to_env_actor(self, mcp_db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+        claimed = mcp_db.start_work(mcp_db.create_issue("Mine via MCP").id, assignee="alice")
+        monkeypatch.setenv("FILIGREE_ACTOR", "alice")
+
+        text = _parse(await call_tool("session_context_get", {}))
+
+        assert "YOUR CLAIMS (actor=alice):" in text
+        assert claimed.id in text
+        assert "actor unknown" not in text
+
+    async def test_session_context_without_actor_prints_count_only(self, mcp_db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("FILIGREE_ACTOR", raising=False)
+        claimed = mcp_db.start_work(mcp_db.create_issue("Someone's via MCP").id, assignee="alice")
+
+        text = _parse(await call_tool("session_context_get", {}))
+
+        assert "IN PROGRESS (1, actor unknown — pass --actor)" in text
+        assert claimed.id not in text
+
     async def test_get_stats(self, mcp_db: FiligreeDB) -> None:
         mcp_db.create_issue("A")
         result = await call_tool("stats_get", {})

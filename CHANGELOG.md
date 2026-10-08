@@ -51,8 +51,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   … actionable` line is replaced by `ANALYZER SIGNAL: d defect-signal
   finding(s) open`, with telemetry rows counted separately as `(+t telemetry
   rows, not work)` (omitted when 0) and hints pointing at `finding list --kind
-  defect --status open`. `session-context` now accepts the global `--actor`.
-  No schema change.
+  defect --status open` (MCP hint adds `suppression=active` so it agrees with
+  the count). Known gap: the count includes kind-less rows that the strict
+  `kind=defect` hint filter omits. `session-context` now accepts the global
+  `--actor` (or `FILIGREE_ACTOR`). No schema change.
 
 ### Removed
 

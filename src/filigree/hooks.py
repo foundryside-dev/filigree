@@ -237,7 +237,7 @@ def _build_context(db: FiligreeDB, filigree_dir: Path | None = None, actor: str 
             lines.append(
                 f"ANALYZER SIGNAL: {defect} defect-signal finding(s) open{telemetry_note} "
                 f"— review with `filigree finding list --kind defect --status open` "
-                f"(MCP: finding_list kind=defect status=open limit=25), bridge with `filigree finding promote`"
+                f"(MCP: finding_list kind=defect status=open suppression=active limit=25), bridge with `filigree finding promote`"
             )
     except sqlite3.OperationalError:
         logger.debug("finding stats unavailable in session context", exc_info=True)

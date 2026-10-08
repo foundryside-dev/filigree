@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
+from click.testing import CliRunner
 
-from filigree.core import FiligreeDB
-from filigree.hooks import READY_CAP, _build_context
+from filigree.cli import cli
+from filigree.core import FiligreeDB, find_filigree_anchor
+from filigree.hooks import READY_CAP, _build_context, resolve_session_actor
 
 
 @pytest.fixture(autouse=True)
@@ -142,7 +146,7 @@ def test_banner_defect_count_and_hint_excludes_telemetry(db: FiligreeDB) -> None
     assert line.startswith("ANALYZER SIGNAL: 2 defect-signal finding(s) open")
     assert "(+3 telemetry rows, not work — see Task 0.5)" in line
     assert "`filigree finding list --kind defect --status open`" in line
-    assert "finding_list kind=defect status=open limit=25" in line
+    assert "finding_list kind=defect status=open suppression=active limit=25" in line
     assert "actionable" not in context
     assert "ANALYZER FINDINGS" not in context
 
@@ -158,3 +162,59 @@ def test_banner_omits_telemetry_line_when_zero(db: FiligreeDB) -> None:
 
 def test_banner_has_no_analyzer_line_without_findings(db: FiligreeDB) -> None:
     assert "ANALYZER" not in _build_context(db)
+
+
+# ---------------------------------------------------------------------------
+# Actor plumbing end to end: resolver precedence and the CLI pass-through
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_session_actor_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert resolve_session_actor() is None
+    assert resolve_session_actor("  ") is None
+    monkeypatch.setenv("FILIGREE_ACTOR", " env-actor ")
+    assert resolve_session_actor() == "env-actor"
+    assert resolve_session_actor("") == "env-actor"
+    assert resolve_session_actor("flag-actor") == "flag-actor"  # explicit beats env
+
+
+def _project_with_claim(root: Path, runner: CliRunner, assignee: str) -> str:
+    os.chdir(root)
+    result = runner.invoke(cli, ["init", "--prefix", "t"])
+    assert result.exit_code == 0, result.output
+    db = FiligreeDB.from_anchor(find_filigree_anchor(root))
+    try:
+        return db.start_work(db.create_issue("Claimed work", priority=1).id, assignee=assignee).id
+    finally:
+        db.close()
+
+
+def test_cli_actor_flag_scopes_session_context(tmp_path: Path, cli_runner: CliRunner) -> None:
+    claimed = _project_with_claim(tmp_path, cli_runner, "alice")
+
+    result = cli_runner.invoke(cli, ["--actor", "alice", "session-context"])
+
+    assert result.exit_code == 0, result.output
+    assert "YOUR CLAIMS (actor=alice):" in result.output
+    assert claimed in result.output
+    assert "actor unknown" not in result.output
+
+
+def test_cli_without_actor_prints_count_only(tmp_path: Path, cli_runner: CliRunner) -> None:
+    claimed = _project_with_claim(tmp_path, cli_runner, "alice")
+
+    result = cli_runner.invoke(cli, ["session-context"])
+
+    assert "IN PROGRESS (1, actor unknown — pass --actor)" in result.output
+    assert claimed not in result.output
+
+
+def test_cli_filigree_actor_env_scopes_session_context(tmp_path: Path, cli_runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
+    claimed = _project_with_claim(tmp_path, cli_runner, "alice")
+    monkeypatch.setenv("FILIGREE_ACTOR", "alice")
+
+    result = cli_runner.invoke(cli, ["session-context"])
+
+    assert result.exit_code == 0, result.output
+    assert "YOUR CLAIMS (actor=alice):" in result.output
+    assert claimed in result.output
