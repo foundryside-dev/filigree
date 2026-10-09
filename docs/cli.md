@@ -1178,6 +1178,34 @@ Update multiple findings in one call.
 
 Records the global `--actor` in each updated finding's `updated_by` field.
 
+### `finding export`
+
+Archive (and optionally drop) stored Wardline telemetry findings (Stage 0).
+Selects every finding whose `metadata.wardline.kind` is a known non-defect kind
+(`fact`, `classification`, `metric`, `suggestion`) or whose file is the
+`<engine>` pseudo-path, at any status. A finding with a missing, corrupt, or
+unknown kind is never selected. Each row is written with its file record as one
+JSONL line (`{"finding": {...}, "file": {...}}`, ordered by finding id). A
+sha256sum-format `<out>.sha256` sidecar is written next to it.
+
+```bash
+filigree finding export --dry-run --json   # count only; writes nothing
+filigree finding export                    # write archive + sidecar; delete nothing
+filigree finding export --delete           # then drop the exported rows
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `--kind` | enum | `non-defect` (the only, default, selection) |
+| `--out` | path | Archive path (default `archive/telemetry-3x.jsonl` under the project root) |
+| `--dry-run` | flag | Count the rows that would be exported; write nothing |
+| `--delete` | flag | After the archive is fsynced, delete the exported rows in one transaction, plus any file record left with no findings and no issue associations |
+| `--force` | flag | Overwrite an existing archive |
+
+Output (`--json`): `{selected, exported, deleted, deleted_file_records, out,
+sha256, dry_run}`. An existing archive without `--force` is `CONFLICT`. A
+write or fsync failure is `IO`, and nothing is deleted.
+
 ### Annotations
 
 Annotations are durable, project-shared file notes with checksum/git/diff

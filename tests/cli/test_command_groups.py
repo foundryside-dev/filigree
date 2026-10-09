@@ -83,6 +83,11 @@ _GROUP_MAP: dict[str, list[tuple[str, str]]] = {
 # ``observation create`` is a visible alias of ``observe`` (filigree-ce3bfae865).
 _VISIBLE_GROUP_ALIASES: dict[str, set[str]] = {"observation": {"create"}}
 
+# Group-only verbs added after the flat->grouped migration: they never had a
+# flat spelling, so they have no _GROUP_MAP row (which would demand a hidden
+# flat alias). ``finding export`` disposes of stored telemetry (Task 0.5c).
+_GROUP_ONLY_VERBS: dict[str, set[str]] = {"finding": {"export"}}
+
 _FLAT_NAMES = [(g, flat) for g, members in _GROUP_MAP.items() for _sub, flat in members]
 _GROUPED = [(g, sub) for g, members in _GROUP_MAP.items() for sub, _flat in members]
 
@@ -152,7 +157,7 @@ def test_mapping_matches_source() -> None:
         grp = cli.commands.get(group)
         assert grp is not None
         registered = {n for n, c in grp.commands.items() if not c.hidden}  # type: ignore[attr-defined]
-        expected = {sub for sub, _flat in members} | _VISIBLE_GROUP_ALIASES.get(group, set())
+        expected = {sub for sub, _flat in members} | _VISIBLE_GROUP_ALIASES.get(group, set()) | _GROUP_ONLY_VERBS.get(group, set())
         assert registered == expected, f"{group}: source has {registered}, table has {expected}"
 
 

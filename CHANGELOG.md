@@ -69,6 +69,23 @@ policy (ADR-030) records this as its one pre-4.0 exception.
   kinds and never sweeps stored telemetry rows, and so that a defects-only
   emit is safe. The same payload is now also served at
   `GET /api/weft/files/_schema`. Additive.
+- **`filigree finding export` archives (and optionally drops) stored telemetry
+  findings (Stage 0).** Selects every `scan_findings` row whose
+  `metadata.wardline.kind` is a known non-defect kind
+  (`fact`/`classification`/`metric`/`suggestion`) or whose file is the
+  `<engine>` pseudo-path, at any status. A row with a missing, corrupt or
+  unknown kind is never selected (FIL-1). Each row is written with its
+  `file_records` row as one JSONL line, ordered by finding id, to
+  `archive/telemetry-3x.jsonl` under the project root (or `--out`), with a
+  sha256sum-format `<out>.sha256` sidecar. It refuses to overwrite an existing
+  file unless `--force` is given. Nothing is deleted by default. `--dry-run`
+  only counts and writes nothing. `--delete` runs only after the archive and
+  its sidecar have been fsynced in the same invocation. It then removes the
+  exported rows in one `BEGIN IMMEDIATE` transaction, along with any file
+  record that no finding or issue association still references. Output:
+  `{selected, exported, deleted, deleted_file_records, out, sha256, dry_run}`
+  (`--json`). Nothing is written to the issues or events tables. No schema
+  change.
 
 ### Changed
 

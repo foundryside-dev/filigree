@@ -176,10 +176,26 @@ def _wardline_non_defect_kind_sql(alias: str = "") -> str:
     return f"(json_valid({col}) AND json_extract({col}, '$.wardline.kind') IN ({kinds}))"
 
 
+def _wardline_non_defect_side_sql(alias: str = "") -> str:
+    """SQL predicate that is true when a stored finding is a KNOWN non-defect kind.
+
+    The ``CASE`` form of ``_wardline_non_defect_kind_sql``, safe to embed
+    anywhere (including function arguments and ``NOT``): SQLite only guarantees
+    lazy evaluation inside ``CASE``, so ``json_extract`` never runs on corrupt
+    text. ``IS 1`` makes NULL ``metadata``, corrupt JSON, ``'{}'``, arrays, a
+    non-object ``wardline`` value and missing/unknown kinds all read false
+    (FIL-1: never selected as telemetry). Used to select rows for the
+    ``finding export`` disposal of stored telemetry.
+    """
+    col = f"{alias}.metadata" if alias else "metadata"
+    kinds = ", ".join(f"'{k}'" for k in sorted(NON_DEFECT_WARDLINE_FINDING_KINDS))
+    return f"(CASE WHEN json_valid({col}) THEN json_extract({col}, '$.wardline.kind') IN ({kinds}) ELSE 0 END IS 1)"
+
+
 def _wardline_defect_side_sql(alias: str = "") -> str:
     """SQL predicate that is true when a stored finding is on the DEFECT side.
 
-    The negation of ``_wardline_non_defect_kind_sql`` for use as a guard on
+    The negation of ``_wardline_non_defect_side_sql`` for use as a guard on
     absence-driven transitions (the ``mark_unseen`` sweep and the clean-stale
     ``unseen_in_latest`` -> ``fixed`` ageing): Stage 0 never moves a stored
     telemetry row on absence. Written as a ``CASE`` because SQLite only
@@ -190,9 +206,7 @@ def _wardline_defect_side_sql(alias: str = "") -> str:
     ``wardline`` value and missing/unknown kinds all read as defect-side
     (FIL-1); only a known non-defect kind is excluded.
     """
-    col = f"{alias}.metadata" if alias else "metadata"
-    kinds = ", ".join(f"'{k}'" for k in sorted(NON_DEFECT_WARDLINE_FINDING_KINDS))
-    return f"NOT (CASE WHEN json_valid({col}) THEN json_extract({col}, '$.wardline.kind') IN ({kinds}) ELSE 0 END IS 1)"
+    return f"NOT {_wardline_non_defect_side_sql(alias)}"
 
 
 def _wardline_finding_kind(finding: Mapping[str, Any]) -> str:
