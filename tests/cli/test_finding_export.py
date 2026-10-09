@@ -150,6 +150,7 @@ def test_dry_run_counts_and_writes_nothing(cli_in_project: tuple[CliRunner, Path
         "exported": 0,
         "deleted": 0,
         "deleted_file_records": 0,
+        "skipped_linked": 0,
         "out": str((root / DEFAULT_OUT).resolve()),
         "sha256": None,
         "dry_run": True,
@@ -285,3 +286,48 @@ def test_delete_refused_when_export_not_fsynced(cli_in_project: tuple[CliRunner,
     with get_db() as db:
         assert _finding_ids(db) == before_findings
         assert _file_paths(db) == before_files
+
+
+def test_issue_linked_telemetry_is_kept_and_counted(cli_in_project: tuple[CliRunner, Path]) -> None:
+    """Controller ruling (0.5c fix 1): a bridged finding (``issue_id`` set) is deliberate
+    evidence — Phase 2 WP-2.6 converts it into an evidence reference — so the export
+    neither archives nor deletes it, and reports it as ``skipped_linked``."""
+    runner, root = cli_in_project
+    with get_db() as db:
+        ids = _seed(
+            db,
+            [
+                _finding("src/linked_only.py", "R-BRIDGED", kind="metric"),
+                _finding("<engine>", "R-ENGINE-BRIDGED", kind="fact"),
+                _finding("src/other.py", "R-FREE", kind="metric"),
+            ],
+        )
+        issue_id = db.promote_finding_to_issue(ids["R-BRIDGED"], actor="test")["issue"].id
+        engine_issue = db.create_issue("Engine evidence", priority=2)
+        db.conn.execute("UPDATE scan_findings SET issue_id = ? WHERE id = ?", (engine_issue.id, ids["R-ENGINE-BRIDGED"]))
+        db.conn.commit()
+        evidence_before = {f.id for f in db.get_issue_findings(issue_id)}
+        engine_evidence_before = {f.id for f in db.get_issue_findings(engine_issue.id)}
+        assert ids["R-BRIDGED"] in evidence_before
+
+    dry = json.loads(_invoke(runner, "--dry-run", "--json").output)
+    assert dry["selected"] == 1
+    assert dry["skipped_linked"] == 2
+
+    result = _invoke(runner, "--delete", "--json")
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["selected"] == payload["exported"] == payload["deleted"] == 1
+    assert payload["skipped_linked"] == 2
+
+    exported = [json.loads(line)["finding"]["id"] for line in (root / DEFAULT_OUT).read_text().splitlines()]
+    assert exported == [ids["R-FREE"]]
+    with get_db() as db:
+        assert _finding_ids(db) == {ids["R-BRIDGED"], ids["R-ENGINE-BRIDGED"]}
+        # Files still holding a kept linked finding are never orphaned.
+        assert _file_paths(db) == {"src/linked_only.py", "<engine>"}
+        assert {f.id for f in db.get_issue_findings(issue_id)} == evidence_before
+        assert {f.id for f in db.get_issue_findings(engine_issue.id)} == engine_evidence_before
+
+    human = runner.invoke(cli, ["finding", "export", "--dry-run"])
+    assert "2 issue-linked" in human.output

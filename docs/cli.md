@@ -1183,8 +1183,15 @@ Records the global `--actor` in each updated finding's `updated_by` field.
 Archive (and optionally drop) stored Wardline telemetry findings (Stage 0).
 Selects every finding whose `metadata.wardline.kind` is a known non-defect kind
 (`fact`, `classification`, `metric`, `suggestion`) or whose file is the
-`<engine>` pseudo-path, at any status. A finding with a missing, corrupt, or
-unknown kind is never selected. Each row is written with its file record as one
+`<engine>` pseudo-path, at any status. Exceptions and caveats:
+
+- On real source paths, a finding with a missing, corrupt, or unknown kind is
+  never selected (FIL-1).
+- Rows on the `<engine>` sentinel path are selected whatever their kind.
+- A finding linked to an issue (`issue_id` set) is never selected, exported,
+  or deleted. These rows are counted as `skipped_linked`.
+
+Each row is written with its file record as one
 JSONL line (`{"finding": {...}, "file": {...}}`, ordered by finding id). A
 sha256sum-format `<out>.sha256` sidecar is written next to it.
 
@@ -1202,8 +1209,8 @@ filigree finding export --delete           # then drop the exported rows
 | `--delete` | flag | After the archive is fsynced, delete the exported rows in one transaction, plus any file record left with no findings and no issue associations |
 | `--force` | flag | Overwrite an existing archive |
 
-Output (`--json`): `{selected, exported, deleted, deleted_file_records, out,
-sha256, dry_run}`. An existing archive without `--force` is `CONFLICT`. A
+Output (`--json`): `{selected, exported, deleted, deleted_file_records,
+skipped_linked, out, sha256, dry_run}`. An existing archive without `--force` is `CONFLICT`. A
 write or fsync failure is `IO`, and nothing is deleted.
 
 ### Annotations

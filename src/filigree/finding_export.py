@@ -12,9 +12,13 @@ A ``scan_findings`` row is selected when its stored ``metadata.wardline.kind``
 is a KNOWN non-defect kind (the ``CASE``-guarded
 ``_wardline_non_defect_side_sql``) or its file record is the ``<engine>``
 pseudo-path (which the 0.5a ingest rejects whatever its kind — it is never a
-file with work on it). FIL-1: on a real path, a row whose kind is missing,
-corrupt, ``'{}'``, ``NULL`` or unknown is defect-side and is never selected.
-Every status is selected, including ``unseen_in_latest`` rows a 3.3 sweep left.
+file with work on it), whatever that ``<engine>`` row's kind. FIL-1: on a real
+source path, a row whose kind is missing, corrupt, ``'{}'``, ``NULL`` or unknown
+is defect-side and is never selected. A row linked to an issue
+(``issue_id IS NOT NULL``) is never selected either -- it is deliberate evidence
+(Phase 2 WP-2.6 converts it into an evidence reference) -- and is reported as
+``skipped_linked``. Every status is selected, including ``unseen_in_latest``
+rows a 3.3 sweep left.
 
 Safety properties
 -----------------
@@ -56,9 +60,13 @@ DEFAULT_EXPORT_RELPATH = Path("archive") / "telemetry-3x.jsonl"
 # Comfortably under SQLite's historical 999 host-parameter limit.
 _ID_CHUNK = 500
 
-_SELECTION = (
-    f"FROM scan_findings sf JOIN file_records fr ON fr.id = sf.file_id WHERE ({_wardline_non_defect_side_sql('sf')} OR fr.path = ?)"
-)
+# Telemetry by classification: a known non-defect kind, or the ``<engine>`` sentinel path.
+_TELEMETRY = f"({_wardline_non_defect_side_sql('sf')} OR fr.path = ?)"
+_FROM = "FROM scan_findings sf JOIN file_records fr ON fr.id = sf.file_id"
+# Issue-linked (bridged) rows are deliberate evidence (Phase 2 WP-2.6 turns them
+# into evidence references): never exported, never deleted, only counted.
+_SELECTION = f"{_FROM} WHERE sf.issue_id IS NULL AND {_TELEMETRY}"
+_LINKED = f"{_FROM} WHERE sf.issue_id IS NOT NULL AND {_TELEMETRY}"
 
 
 class ExportTargetExistsError(FileExistsError):
@@ -83,6 +91,11 @@ def sidecar_path(out: Path) -> Path:
 def count_telemetry_findings(db: FiligreeDB) -> int:
     """Number of stored rows the export would select (writes nothing)."""
     return int(db.conn.execute(f"SELECT COUNT(*) {_SELECTION}", (WARDLINE_ENGINE_PSEUDO_PATH,)).fetchone()[0])
+
+
+def count_linked_telemetry_findings(db: FiligreeDB) -> int:
+    """Number of telemetry rows kept because an issue links them (``issue_id`` set)."""
+    return int(db.conn.execute(f"SELECT COUNT(*) {_LINKED}", (WARDLINE_ENGINE_PSEUDO_PATH,)).fetchone()[0])
 
 
 def _columns(conn: sqlite3.Connection, table: str) -> list[str]:
@@ -183,7 +196,7 @@ def delete_exported_findings(db: FiligreeDB, export: FindingExport) -> tuple[int
 
     Runs in one ``BEGIN IMMEDIATE``. Each exported id is re-checked against the
     selection predicate under the writer lock, so a row whose classification
-    changed since the export is kept. A file record is dropped only when no
+    changed, or that an issue started linking, since the export is kept. A file record is dropped only when no
     ``scan_findings`` and no ``file_associations`` row references it any
     more; its file-domain residue is cleaned exactly as ``delete_file_record``
     does (``file_events`` and file/finding ``annotation_links`` deleted,
@@ -238,8 +251,9 @@ def delete_exported_findings(db: FiligreeDB, export: FindingExport) -> tuple[int
 def run_finding_export(db: FiligreeDB, out: Path, *, delete: bool = False, force: bool = False, dry_run: bool = False) -> dict[str, Any]:
     """Count (``dry_run``), export, or export-then-delete; return the counts payload.
 
-    ``{"selected", "exported", "deleted", "deleted_file_records", "out",
-    "sha256", "dry_run"}``. ``dry_run`` writes nothing at all (not even the
+    ``{"selected", "exported", "deleted", "deleted_file_records",
+    "skipped_linked", "out", "sha256", "dry_run"}``; ``skipped_linked`` counts
+    telemetry rows left in place because an issue links them. ``dry_run`` writes nothing at all (not even the
     archive directory) and cannot be combined with ``delete``.
     """
     if dry_run and delete:
@@ -249,6 +263,7 @@ def run_finding_export(db: FiligreeDB, out: Path, *, delete: bool = False, force
         "exported": 0,
         "deleted": 0,
         "deleted_file_records": 0,
+        "skipped_linked": count_linked_telemetry_findings(db),
         "out": str(out),
         "sha256": None,
         "dry_run": dry_run,

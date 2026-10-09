@@ -1404,9 +1404,11 @@ def export_findings_cmd(kind: str, out: Path | None, delete: bool, dry_run: bool
 
     Writes every scan finding whose wardline kind is a known non-defect kind
     (fact/classification/metric/suggestion), or whose file is the <engine>
-    pseudo-path, to JSONL with its file record, plus a sha256sum-format
-    ``<out>.sha256`` sidecar. Deletes nothing unless --delete is passed; a
-    finding with a missing, corrupt, or unknown kind is never selected.
+    pseudo-path (whatever its kind), to JSONL with its file record, plus a
+    sha256sum-format ``<out>.sha256`` sidecar. Deletes nothing unless --delete
+    is passed. On real source paths a finding with a missing, corrupt, or
+    unknown kind is never selected; a finding linked to an issue is never
+    selected and is counted as skipped_linked.
     """
     del kind  # single-valued today; the option documents the selection
     if dry_run and delete:
@@ -1426,8 +1428,10 @@ def export_findings_cmd(kind: str, out: Path | None, delete: bool, dry_run: bool
     if as_json:
         click.echo(json_mod.dumps(result))
         return
+    linked_note = f"{result['skipped_linked']} issue-linked telemetry finding(s) kept (never exported or deleted)"
     if dry_run:
         click.echo(f"Would export {result['selected']} non-defect finding(s) to {result['out']} (dry run: nothing written)")
+        click.echo(linked_note)
         return
     click.echo(f"Exported {result['exported']} non-defect finding(s) to {result['out']}")
     click.echo(f"sha256 {result['sha256']}  (sidecar {result['out']}.sha256)")
@@ -1435,6 +1439,7 @@ def export_findings_cmd(kind: str, out: Path | None, delete: bool, dry_run: bool
         click.echo(f"Deleted {result['deleted']} finding(s) and {result['deleted_file_records']} unreferenced file record(s)")
     else:
         click.echo("Nothing deleted (pass --delete to drop the exported rows)")
+    click.echo(linked_note)
 
 
 def _emit_export_error(msg: str, code: ErrorCode, *, as_json: bool) -> NoReturn:
