@@ -321,8 +321,11 @@ running in `local` or `loomweave` mode.
 The same response carries a top-level `accept_kinds` list (Stage 0 telemetry
 cut): the `metadata.wardline.kind` values the scan ingest accepts, from the
 project's `scan_ingest.accept_kinds` setting (default `["defect"]`; `["*"]`
-accepts every kind and `<engine>` rows, the 3.3 behaviour). Any other finding is
-rejected per-finding in `failed[]` with code `KIND_NOT_ACCEPTED`. A build that
+accepts every kind, the 3.3 behaviour). Any other finding is rejected
+per-finding in `failed[]` with code `KIND_NOT_ACCEPTED`. The path plays no part:
+a defect on Wardline's `<engine>` pseudo-path is accepted, and a telemetry kind
+is rejected on every path. A finding with a missing or unknown kind counts as a
+defect. A build that
 advertises `accept_kinds` also never moves a stored telemetry row to
 `unseen_in_latest` in the `mark_unseen` sweep, so a producer may emit defects
 only. When the key is absent (pre-Stage-0 builds), the producer must keep

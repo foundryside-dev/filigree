@@ -1182,12 +1182,14 @@ Records the global `--actor` in each updated finding's `updated_by` field.
 
 Archive (and optionally drop) stored Wardline telemetry findings (Stage 0).
 Selects every finding whose `metadata.wardline.kind` is a known non-defect kind
-(`fact`, `classification`, `metric`, `suggestion`) or whose file is the
-`<engine>` pseudo-path, at any status. Exceptions and caveats:
+(`fact`, `classification`, `metric`, `suggestion`), on any path and at any
+status. This is the same rule the scan ingest rejects on. Exceptions and caveats:
 
-- On real source paths, a finding with a missing, corrupt, or unknown kind is
-  never selected (FIL-1).
-- Rows on the `<engine>` sentinel path are selected whatever their kind.
+- A finding with a missing, corrupt, or unknown kind is never selected
+  (FIL-1), on every path.
+- The `<engine>` pseudo-path is selected by kind like any other path. Wardline
+  emits real defects there (for example `WLN-ENGINE-LINELESS-DEFECT`), and they
+  are never selected.
 - A finding linked to an issue (`issue_id` set) is never selected, exported,
   or deleted. These rows are counted as `skipped_linked`.
 

@@ -72,10 +72,11 @@ policy (ADR-030) records this as its one pre-4.0 exception.
 - **`filigree finding export` archives (and optionally drops) stored telemetry
   findings (Stage 0).** Selects every `scan_findings` row whose
   `metadata.wardline.kind` is a known non-defect kind
-  (`fact`/`classification`/`metric`/`suggestion`) or whose file is the
-  `<engine>` pseudo-path, at any status. On real source paths, a row with a
-  missing, corrupt or unknown kind is never selected (FIL-1). Rows on the
-  `<engine>` sentinel path are selected whatever their kind. A row linked to
+  (`fact`/`classification`/`metric`/`suggestion`), on any path and at any
+  status. A row with a missing, corrupt or unknown kind is never selected
+  (FIL-1). The `<engine>` pseudo-path is selected by kind like any other path,
+  because Wardline also emits real defects there (for example
+  `WLN-ENGINE-LINELESS-DEFECT`). A row linked to
   an issue (`issue_id` set) is never selected. It is kept as evidence and
   counted as `skipped_linked`. Each row is written with its
   `file_records` row as one JSONL line, ordered by finding id, to
@@ -190,8 +191,10 @@ policy (ADR-030) records this as its one pre-4.0 exception.
   envelope is unchanged. No schema change.
 - **Scan ingest accepts defect findings only by default; the sweep never
   flips telemetry (Stage 0).** A finding whose `metadata.wardline.kind` is a
-  telemetry kind (`fact`, `classification`, `metric`, `suggestion`), or whose
-  path is Wardline's `<engine>` pseudo-path, is no longer stored as a finding.
+  telemetry kind (`fact`, `classification`, `metric`, `suggestion`) is no
+  longer stored as a finding, on any path. The path plays no part: a defect on
+  Wardline's `<engine>` pseudo-path (for example `WLN-ENGINE-LINELESS-DEFECT`,
+  which wraps a code defect whose line is unknown) is still accepted.
   It is rejected per-finding in `failed[]` with `code: "KIND_NOT_ACCEPTED"`
   (reason `telemetry kinds are not work; see Stage 0`) and counted in the new
   `stats.rejected_by_kind`; the rest of the batch is ingested and the call
@@ -206,7 +209,7 @@ policy (ADR-030) records this as its one pre-4.0 exception.
   stay there. Rows with missing, corrupt or `{}` metadata are still swept and
   aged as before. Telemetry
   rows that are already stored are left as they are. To restore the 3.3
-  behaviour (store every kind, `<engine>` rows included), set
+  behaviour (store every kind), set
   `"scan_ingest": {"accept_kinds": ["*"]}` in `.weft/filigree/config.json`; a
   list such as `["defect", "fact"]` accepts just those kinds. A malformed
   setting falls back to `["defect"]`. `finding_report` (MCP/CLI) now returns a

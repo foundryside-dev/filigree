@@ -1,9 +1,10 @@
 """Stage 0 telemetry cut (Task 0.5a): the scan ingest accepts defect kinds only by default.
 
 Wardline emits engine telemetry (``fact`` / ``classification`` / ``metric`` /
-``suggestion`` kinds, and ``<engine>`` pseudo-path rows) alongside defects. Those
-are not work. By default (``scan_ingest.accept_kinds = ["defect"]``) the ingest
-rejects them per-finding with ``KIND_NOT_ACCEPTED``; ``["*"]`` restores the 3.3
+``suggestion`` kinds) alongside defects. Those are not work. The ``<engine>``
+pseudo-path plays no part in the decision: Wardline also emits real defects
+there. By default (``scan_ingest.accept_kinds = ["defect"]``) the ingest rejects
+telemetry kinds per-finding with ``KIND_NOT_ACCEPTED``; ``["*"]`` restores the 3.3
 behaviour. Independently of the setting, the ``mark_unseen`` sweep never
 transitions a stored non-defect row — otherwise a defects-only producer would
 flip every previously-ingested telemetry row to ``unseen_in_latest`` (and the
@@ -121,8 +122,25 @@ class TestIngestRejectsNonDefectKinds:
         assert result["rejected_by_kind"] == 0
         assert result["findings_created"] == 1
 
-    @pytest.mark.parametrize("kind", ["defect", None])
-    def test_ingest_engine_path_rejected(self, db: FiligreeDB, kind: str | None) -> None:
+    @pytest.mark.parametrize("kind", ["defect", None, "frobnicate"])
+    def test_ingest_engine_path_defect_side_kind_accepted(self, db: FiligreeDB, kind: str | None) -> None:
+        """Final-review ruling (I1): ``<engine>`` is not itself telemetry. Wardline emits real
+        gating defects there (WLN-ENGINE-LINELESS-DEFECT, WLN-ENGINE-POLICY-CONFIG, ...), so a
+        defect-side kind (defect, missing, unknown -- FIL-1) at ``<engine>`` is accepted."""
+        findings = [
+            _finding("<engine>", "WLN-ENGINE-LINELESS-DEFECT", kind=kind, fingerprint="fp-engine"),
+            _finding("src/a.py", "R1"),
+        ]
+
+        result = db.process_scan_results(scan_source="wardline", findings=findings)
+
+        assert result["failed"] == []
+        assert result["rejected_by_kind"] == 0
+        assert result["findings_created"] == 2
+        assert db.get_file_by_path("<engine>") is not None
+
+    @pytest.mark.parametrize("kind", ["metric", "fact", "classification", "suggestion"])
+    def test_ingest_engine_path_non_defect_kind_rejected(self, db: FiligreeDB, kind: str) -> None:
         findings = [
             _finding("<engine>", "WL-ENGINE", kind=kind, fingerprint="fp-engine"),
             _finding("src/a.py", "R1"),
@@ -162,9 +180,28 @@ class TestIngestRejectsNonDefectKinds:
 
         result = db.process_scan_results(scan_source="wardline", findings=findings)
 
-        # ``<engine>`` is rejected whenever ``*`` is not in the set, regardless of kind.
-        assert [(f["index"], f["code"]) for f in result["failed"]] == [(2, "KIND_NOT_ACCEPTED"), (3, "KIND_NOT_ACCEPTED")]
-        assert result["findings_created"] == 2
+        # The path plays no part: an accepted kind at ``<engine>`` is accepted like anywhere else.
+        assert [(f["index"], f["code"]) for f in result["failed"]] == [(2, "KIND_NOT_ACCEPTED")]
+        assert result["findings_created"] == 3
+
+    def test_defect_rejected_by_operator_setting_is_not_called_telemetry(self, db: FiligreeDB) -> None:
+        """A list without ``defect`` rejects defect-side findings, but the reason names the
+        setting instead of falsely calling them telemetry."""
+        set_scan_ingest_accept_kinds(db, ["fact"])
+        findings = [
+            _finding("src/a.py", "R-DEFECT"),
+            _finding("src/a.py", "R-BARE", kind=None),
+            _finding("src/a.py", "R-FACT", kind="fact"),
+        ]
+
+        result = db.process_scan_results(scan_source="wardline", findings=findings)
+
+        defect_reason = "kind 'defect' is not in this project's scan_ingest.accept_kinds"
+        assert [(f["index"], f["code"], f["reason"]) for f in result["failed"]] == [
+            (0, "KIND_NOT_ACCEPTED", defect_reason),
+            (1, "KIND_NOT_ACCEPTED", defect_reason),
+        ]
+        assert result["findings_created"] == 1
 
     def test_rejected_telemetry_line_range_does_not_fail_the_batch(self, tmp_path: Path) -> None:
         """A rejected finding is not ingested, so its line attribution is never checked."""

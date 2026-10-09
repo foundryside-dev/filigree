@@ -85,18 +85,25 @@ INGESTED_FILE_ID_KEY = "_filigree_ingested_file_id"
 #                       the mismatch is batch-level and its findings are still
 #                       ingested, so it is carried by ``weft_reasons``
 #                       (PDR-0023), not per-finding.
-#   KIND_NOT_ACCEPTED -- Stage 0 telemetry cut: the finding's wardline kind is
-#                       not in the project's ``scan_ingest.accept_kinds``, or
-#                       its path is the ``<engine>`` pseudo-path (emitted by the
-#                       ingest today; see ``_kind_rejected_indices``).
+#   KIND_NOT_ACCEPTED -- Stage 0 telemetry cut: the finding's classified wardline
+#                       kind is not in the project's ``scan_ingest.accept_kinds``
+#                       (emitted by the ingest today; see ``_kind_rejected_indices``).
+#                       The path plays no part: ``<engine>`` rows are classified
+#                       by kind like any other.
 SCAN_FAILURE_OVER_CAP = "OVER_CAP"
 SCAN_FAILURE_KIND_NOT_ACCEPTED = "KIND_NOT_ACCEPTED"
 _KIND_NOT_ACCEPTED_REASON = "telemetry kinds are not work; see Stage 0"
-# ``scan_ingest.accept_kinds`` wildcard: accept every kind and ``<engine>`` rows
-# (the 3.3 behaviour). Read via ``filigree.core.read_scan_ingest_accept_kinds``.
+# A defect-side finding is rejected only when ``defect`` is not in the project's
+# ``scan_ingest.accept_kinds`` (an operator choice), so it is not called telemetry.
+_KIND_NOT_ACCEPTED_DEFECT_REASON = "kind 'defect' is not in this project's scan_ingest.accept_kinds"
+# ``scan_ingest.accept_kinds`` wildcard: accept every kind (the 3.3 behaviour).
+# Read via ``filigree.core.read_scan_ingest_accept_kinds``.
 SCAN_INGEST_ACCEPT_ALL_KINDS = "*"
-# Wardline's pseudo-path for engine-level rows (run metrics, analyzer facts):
-# never a file in the project, so never work.
+# Wardline's pseudo-path for engine-level rows. It carries telemetry (run metrics,
+# analyzer facts) AND real defects (WLN-ENGINE-LINELESS-DEFECT wraps a code defect
+# whose line is unknown; WLN-ENGINE-POLICY-CONFIG, WLN-ENGINE-FINGERPRINT-COLLISION,
+# WLN-L3-MONOTONICITY-VIOLATION), so it is classified by kind like any other path
+# (final-review ruling I1) -- never rejected or exported for its path alone.
 WARDLINE_ENGINE_PSEUDO_PATH = "<engine>"
 
 # ---------------------------------------------------------------------------
@@ -224,20 +231,32 @@ def _wardline_finding_kind(finding: Mapping[str, Any]) -> str:
     return kind if isinstance(kind, str) and kind in NON_DEFECT_WARDLINE_FINDING_KINDS else "defect"
 
 
+def _kind_not_accepted_reason(finding: Mapping[str, Any]) -> str:
+    """The ``KIND_NOT_ACCEPTED`` reason for one rejected finding.
+
+    A telemetry kind gets the Stage 0 reason. A defect-side finding is only
+    rejected when an operator dropped ``defect`` from ``scan_ingest.accept_kinds``;
+    calling it telemetry would be false, so it names the setting instead.
+    """
+    if _wardline_finding_kind(finding) in NON_DEFECT_WARDLINE_FINDING_KINDS:
+        return _KIND_NOT_ACCEPTED_REASON
+    return _KIND_NOT_ACCEPTED_DEFECT_REASON
+
+
 def _kind_rejected_indices(findings: Sequence[Mapping[str, Any]], accept_kinds: Sequence[str]) -> list[int]:
     """Request positions of findings the Stage 0 kind policy rejects.
 
-    ``*`` in *accept_kinds* accepts everything (the 3.3 behaviour, ``<engine>``
-    rows included). Otherwise a finding is rejected when its classified kind is
-    not accepted, or when its path is the ``<engine>`` pseudo-path regardless
-    of kind. Paths must already be normalised (``_validate_scan_findings``).
+    ``*`` in *accept_kinds* accepts everything (the 3.3 behaviour). Otherwise a
+    finding is rejected exactly when its classified kind
+    (``_wardline_finding_kind``) is not accepted. The path plays no part: a
+    defect-side finding on the ``<engine>`` pseudo-path (defect, missing or
+    unknown kind -- FIL-1) is a real defect and is accepted under the default
+    policy, and a known non-defect kind is rejected on every path.
     """
     if SCAN_INGEST_ACCEPT_ALL_KINDS in accept_kinds:
         return []
     accepted = frozenset(accept_kinds)
-    return [
-        index for index, f in enumerate(findings) if f["path"] == WARDLINE_ENGINE_PSEUDO_PATH or _wardline_finding_kind(f) not in accepted
-    ]
+    return [index for index, f in enumerate(findings) if _wardline_finding_kind(f) not in accepted]
 
 
 def _wardline_field_eq_sql(field: str, alias: str = "") -> str:
@@ -1813,7 +1832,7 @@ class FilesMixin(DBMixinProtocol):
 
         warnings = self._validate_scan_findings(findings, scan_source)
         # Stage 0 telemetry cut: drop findings whose wardline kind the project
-        # does not accept (and ``<engine>`` rows) BEFORE anything else touches
+        # does not accept (on any path, ``<engine>`` included) BEFORE anything else touches
         # them -- they are never line-checked, registry-resolved, or written.
         # Recorded once, pre-lock, like OVER_CAP. ``index`` is the REQUEST
         # position; ``survivors`` / ``survivor_indices`` carry the rest.
@@ -1848,7 +1867,7 @@ class FilesMixin(DBMixinProtocol):
                     index=index,
                     fingerprint=findings[index].get("fingerprint") or None,
                     code=SCAN_FAILURE_KIND_NOT_ACCEPTED,
-                    reason=_KIND_NOT_ACCEPTED_REASON,
+                    reason=_kind_not_accepted_reason(findings[index]),
                 )
             )
         regressed_issue_ids: set[str] = set()

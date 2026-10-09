@@ -1,8 +1,8 @@
 """Export-and-drop of stored Wardline telemetry findings (Stage 0, Task 0.5c).
 
 Stage 0 stopped Wardline engine telemetry (the non-defect kinds
-``fact`` / ``classification`` / ``metric`` / ``suggestion`` and ``<engine>``
-pseudo-path rows) from entering the tracker. This module disposes of the rows
+``fact`` / ``classification`` / ``metric`` / ``suggestion``, on any path) from
+entering the tracker. This module disposes of the rows
 a 3.x ingest already stored. It is operator-invoked through
 ``filigree finding export`` and never runs implicitly.
 
@@ -10,11 +10,13 @@ Selection
 ---------
 A ``scan_findings`` row is selected when its stored ``metadata.wardline.kind``
 is a KNOWN non-defect kind (the ``CASE``-guarded
-``_wardline_non_defect_side_sql``) or its file record is the ``<engine>``
-pseudo-path (which the 0.5a ingest rejects whatever its kind — it is never a
-file with work on it), whatever that ``<engine>`` row's kind. FIL-1: on a real
-source path, a row whose kind is missing, corrupt, ``'{}'``, ``NULL`` or unknown
-is defect-side and is never selected. A row linked to an issue
+``_wardline_non_defect_side_sql``) -- the same predicate the ingest rejects on
+and the sweep guard excludes. The path plays no part (final-review ruling I1):
+Wardline emits real defects on the ``<engine>`` pseudo-path
+(WLN-ENGINE-LINELESS-DEFECT and friends), so an ``<engine>`` row is selected
+only for a non-defect kind. FIL-1: on every path, ``<engine>`` included, a row
+whose kind is missing, corrupt, ``'{}'``, ``NULL`` or unknown is defect-side
+and is never selected. A row linked to an issue
 (``issue_id IS NOT NULL``) is never selected either -- it is deliberate evidence
 (Phase 2 WP-2.6 converts it into an evidence reference) -- and is reported as
 ``skipped_linked``. Every status is selected, including ``unseen_in_latest``
@@ -49,7 +51,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from filigree.db_base import _begin_immediate
-from filigree.db_files import WARDLINE_ENGINE_PSEUDO_PATH, _wardline_non_defect_side_sql
+from filigree.db_files import _wardline_non_defect_side_sql
 
 if TYPE_CHECKING:
     from filigree.core import FiligreeDB
@@ -60,8 +62,8 @@ DEFAULT_EXPORT_RELPATH = Path("archive") / "telemetry-3x.jsonl"
 # Comfortably under SQLite's historical 999 host-parameter limit.
 _ID_CHUNK = 500
 
-# Telemetry by classification: a known non-defect kind, or the ``<engine>`` sentinel path.
-_TELEMETRY = f"({_wardline_non_defect_side_sql('sf')} OR fr.path = ?)"
+# Telemetry by classification only: a known non-defect kind, on any path.
+_TELEMETRY = _wardline_non_defect_side_sql("sf")
 _FROM = "FROM scan_findings sf JOIN file_records fr ON fr.id = sf.file_id"
 # Issue-linked (bridged) rows are deliberate evidence (Phase 2 WP-2.6 turns them
 # into evidence references): never exported, never deleted, only counted.
@@ -90,12 +92,12 @@ def sidecar_path(out: Path) -> Path:
 
 def count_telemetry_findings(db: FiligreeDB) -> int:
     """Number of stored rows the export would select (writes nothing)."""
-    return int(db.conn.execute(f"SELECT COUNT(*) {_SELECTION}", (WARDLINE_ENGINE_PSEUDO_PATH,)).fetchone()[0])
+    return int(db.conn.execute(f"SELECT COUNT(*) {_SELECTION}").fetchone()[0])
 
 
 def count_linked_telemetry_findings(db: FiligreeDB) -> int:
     """Number of telemetry rows kept because an issue links them (``issue_id`` set)."""
-    return int(db.conn.execute(f"SELECT COUNT(*) {_LINKED}", (WARDLINE_ENGINE_PSEUDO_PATH,)).fetchone()[0])
+    return int(db.conn.execute(f"SELECT COUNT(*) {_LINKED}").fetchone()[0])
 
 
 def _columns(conn: sqlite3.Connection, table: str) -> list[str]:
@@ -115,7 +117,7 @@ def _iter_export_lines(conn: sqlite3.Connection) -> Iterator[tuple[str, bytes]]:
     select = ", ".join(
         [f'sf."{c}" AS "f{i}"' for i, c in enumerate(finding_cols)] + [f'fr."{c}" AS "r{i}"' for i, c in enumerate(file_cols)]
     )
-    cursor = conn.execute(f"SELECT {select} {_SELECTION} ORDER BY sf.id", (WARDLINE_ENGINE_PSEUDO_PATH,))
+    cursor = conn.execute(f"SELECT {select} {_SELECTION} ORDER BY sf.id")
     for row in cursor:
         finding = {c: row[f"f{i}"] for i, c in enumerate(finding_cols)}
         file_record = {c: row[f"r{i}"] for i, c in enumerate(file_cols)}
@@ -211,7 +213,7 @@ def delete_exported_findings(db: FiligreeDB, export: FindingExport) -> tuple[int
         for chunk in _chunks(export.finding_ids):
             rows = conn.execute(
                 f"SELECT sf.id, sf.file_id {_SELECTION} AND sf.id IN ({_placeholders(chunk)})",
-                (WARDLINE_ENGINE_PSEUDO_PATH, *chunk),
+                tuple(chunk),
             ).fetchall()
             ids = [row["id"] for row in rows]
             if not ids:

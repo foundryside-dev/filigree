@@ -1386,7 +1386,7 @@ def batch_update_findings_cmd(
     default="non-defect",
     show_default=True,
     type=click.Choice(["non-defect"]),
-    help="Which stored findings to export: non-defect wardline kinds and <engine> pseudo-path rows",
+    help="Which stored findings to export: non-defect wardline kinds, on any path",
 )
 @click.option(
     "--out",
@@ -1403,12 +1403,12 @@ def export_findings_cmd(kind: str, out: Path | None, delete: bool, dry_run: bool
     """Export (and optionally drop) stored non-defect findings.
 
     Writes every scan finding whose wardline kind is a known non-defect kind
-    (fact/classification/metric/suggestion), or whose file is the <engine>
-    pseudo-path (whatever its kind), to JSONL with its file record, plus a
-    sha256sum-format ``<out>.sha256`` sidecar. Deletes nothing unless --delete
-    is passed. On real source paths a finding with a missing, corrupt, or
-    unknown kind is never selected; a finding linked to an issue is never
-    selected and is counted as skipped_linked.
+    (fact/classification/metric/suggestion), on any path, to JSONL with its
+    file record, plus a sha256sum-format ``<out>.sha256`` sidecar. Deletes
+    nothing unless --delete is passed. A finding with a missing, corrupt, or
+    unknown kind is never selected (on every path, the <engine> pseudo-path
+    included, which also carries real defects); a finding linked to an issue
+    is never selected and is counted as skipped_linked.
     """
     del kind  # single-valued today; the option documents the selection
     if dry_run and delete:

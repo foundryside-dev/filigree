@@ -1,9 +1,9 @@
 """``filigree finding export`` — archive (and optionally drop) stored telemetry rows (Task 0.5c).
 
 Stage 0 stopped Wardline telemetry (``fact`` / ``classification`` / ``metric`` /
-``suggestion`` kinds and ``<engine>`` pseudo-path rows) from entering the tracker.
-This verb disposes of the rows already stored: it writes every non-defect /
-``<engine>`` ``scan_findings`` row (with its ``file_records`` join) to JSONL plus
+``suggestion`` kinds, on any path including ``<engine>``) from entering the tracker.
+This verb disposes of the rows already stored: it writes every non-defect
+``scan_findings`` row (with its ``file_records`` join) to JSONL plus
 a sha256sum-format sidecar, and — only with ``--delete`` — drops those rows and
 any file record they leave unreferenced. FIL-1: a row whose kind is missing,
 corrupt, or unknown is defect-side and is never selected.
@@ -252,17 +252,57 @@ def test_export_never_selects_defect_rows(cli_in_project: tuple[CliRunner, Path]
         assert _file_paths(db) == {"src/a.py"}
 
 
-def test_engine_path_rows_are_selected_whatever_their_kind(cli_in_project: tuple[CliRunner, Path]) -> None:
-    """``<engine>`` is a pseudo-path, never a file with work on it: the 0.5a ingest
-    rejects every ``<engine>`` row whatever its kind, and the export selects them the
-    same way (brief: "non-defect kind or ``<engine>`` path")."""
-    runner, _root = cli_in_project
+def test_engine_path_rows_are_selected_only_for_non_defect_kinds(cli_in_project: tuple[CliRunner, Path]) -> None:
+    """Final-review ruling (I1): ``<engine>`` is selected by kind like any other path.
+    Wardline emits real defects at ``<engine>`` (WLN-ENGINE-LINELESS-DEFECT, ...), so a
+    defect-side row there (defect, missing or unknown kind -- FIL-1) is never selected."""
+    runner, root = cli_in_project
     with get_db() as db:
-        ids = _seed(db, [_finding("<engine>", "R-ENGINE-DEFECT", kind="defect"), _finding("<engine>", "R-ENGINE-BARE", kind=None)])
+        ids = _seed(
+            db,
+            [
+                _finding("<engine>", "R-ENGINE-DEFECT", kind="defect"),
+                _finding("<engine>", "R-ENGINE-BARE", kind=None),
+                _finding("<engine>", "R-ENGINE-UNKNOWN", kind="frobnicate"),
+                _finding("<engine>", "R-ENGINE-METRIC", kind="metric"),
+            ],
+        )
 
-    result = _invoke(runner, "--dry-run", "--json")
+    result = _invoke(runner, "--json")
     assert result.exit_code == 0, result.output
-    assert json.loads(result.output)["selected"] == len(ids)
+    assert json.loads(result.output)["selected"] == 1
+    exported = [json.loads(line)["finding"]["id"] for line in (root / DEFAULT_OUT).read_text().splitlines()]
+    assert exported == [ids["R-ENGINE-METRIC"]]
+
+
+def test_engine_defect_is_ingested_and_never_exported_engine_metric_is_rejected_and_exported(
+    cli_in_project: tuple[CliRunner, Path],
+) -> None:
+    """End to end under the default policy (``accept_kinds = ["defect"]``): an ``<engine>``
+    defect lands as a finding and the export never selects it; an ``<engine>`` metric is
+    refused at ingest, and one a 3.3 ingest already stored is selected by the export."""
+    runner, root = cli_in_project
+    with get_db() as db:
+        result = db.process_scan_results(
+            scan_source="wardline",
+            findings=[
+                _finding("<engine>", "WLN-ENGINE-LINELESS-DEFECT", kind="defect"),
+                _finding("<engine>", "WLN-ENGINE-RUN", kind="metric"),
+            ],
+        )
+        assert [(f["index"], f["code"]) for f in result["failed"]] == [(1, "KIND_NOT_ACCEPTED")]
+        assert result["findings_created"] == 1
+        defect_id = result["new_finding_ids"][0]
+        # A legacy (3.3) ingest stored the metric before Stage 0.
+        legacy = _seed(db, [_finding("<engine>", "WLN-ENGINE-RUN-3X", kind="metric")])
+
+    payload = json.loads(_invoke(runner, "--delete", "--json").output)
+    assert payload["selected"] == payload["deleted"] == 1
+    exported = [json.loads(line)["finding"]["id"] for line in (root / DEFAULT_OUT).read_text().splitlines()]
+    assert exported == [legacy["WLN-ENGINE-RUN-3X"]]
+    with get_db() as db:
+        assert _finding_ids(db) == {defect_id}
+        assert _file_paths(db) == {"<engine>"}
 
 
 def test_delete_refused_when_export_not_fsynced(cli_in_project: tuple[CliRunner, Path], monkeypatch: pytest.MonkeyPatch) -> None:

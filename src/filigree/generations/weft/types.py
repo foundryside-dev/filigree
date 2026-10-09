@@ -62,8 +62,8 @@ class ScanStats(TypedDict):
     #: ``requested - applied`` is what was dropped (itemised in ``failed``).
     applied: int
     #: Findings rejected with ``KIND_NOT_ACCEPTED`` (Stage 0 telemetry cut): a
-    #: wardline kind outside the project's ``scan_ingest.accept_kinds``, or an
-    #: ``<engine>`` pseudo-path row. Each is also itemised in ``failed``.
+    #: wardline kind outside the project's ``scan_ingest.accept_kinds``, on any
+    #: path. Each is also itemised in ``failed``.
     rejected_by_kind: int
 
 
@@ -78,7 +78,7 @@ class ScanFindingFailureWeft(TypedDict):
     members: ``OVER_CAP`` (dropped by the registry's per-path body cap),
     ``VALIDATION`` (malformed finding), ``SCHEME_MISMATCH`` (fingerprint scheme
     differs from the store's), ``KIND_NOT_ACCEPTED`` (Stage 0: a wardline kind
-    the project does not accept, or an ``<engine>`` pseudo-path row).
+    the project does not accept, on any path).
     ``reason`` is human-readable operator text.
     """
 

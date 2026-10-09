@@ -291,8 +291,8 @@ def test_default_policy_rejects_golden_telemetry_kinds(tmp_path: Path) -> None:
     """Under the default ``accept_kinds`` (``["defect"]``) the golden's telemetry rows are refused per-finding.
 
     Expectations are DERIVED from the wire: every finding whose
-    ``metadata.wardline.kind`` is a non-defect kind (or whose path is the
-    ``<engine>`` pseudo-path) must come back in ``failed[]`` as
+    ``metadata.wardline.kind`` is a non-defect kind (on any path, ``<engine>``
+    included) must come back in ``failed[]`` as
     ``KIND_NOT_ACCEPTED`` at its request index, and only the defects persist.
     """
     golden = load_golden(GOLDEN_PATH)
@@ -300,9 +300,7 @@ def test_default_policy_rejects_golden_telemetry_kinds(tmp_path: Path) -> None:
     assert isinstance(parsed, dict)
     golden = load_golden(GOLDEN_PATH)
     telemetry_indices = [
-        index
-        for index, f in enumerate(golden["findings"])
-        if f["metadata"]["wardline"].get("kind") in NON_DEFECT_WARDLINE_FINDING_KINDS or f["path"] == "<engine>"
+        index for index, f in enumerate(golden["findings"]) if f["metadata"]["wardline"].get("kind") in NON_DEFECT_WARDLINE_FINDING_KINDS
     ]
     # The golden must actually exercise the policy, or this test proves nothing.
     assert telemetry_indices

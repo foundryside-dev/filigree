@@ -312,7 +312,7 @@
     },
     {
       "name": "partial_kind_not_accepted_reports_failed",
-      "note": "Stage 0 telemetry cut under the default scan_ingest.accept_kinds ([\"defect\"]). Finding 0 is a defect and is ingested. Finding 1 carries a telemetry kind (metadata.wardline.kind = fact) and finding 2 sits on the <engine> pseudo-path; both are rejected per-finding with KIND_NOT_ACCEPTED (index is the position in the REQUEST array), counted in stats.rejected_by_kind, and never written. The batch still returns 200.",
+      "note": "Stage 0 telemetry cut under the default scan_ingest.accept_kinds ([\"defect\"]). Finding 0 is a defect and is ingested. Finding 1 carries a telemetry kind (metadata.wardline.kind = fact) and finding 2 carries one on the <engine> pseudo-path (metadata.wardline.kind = metric); the path plays no part, so both are rejected per-finding with KIND_NOT_ACCEPTED (index is the position in the REQUEST array), counted in stats.rejected_by_kind, and never written. The batch still returns 200.",
       "request": {
         "method": "POST",
         "path": "/api/weft/scan-results",

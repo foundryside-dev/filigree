@@ -1464,10 +1464,10 @@ def read_integration_ref(filigree_dir: Path) -> str:
 # Stage 0 telemetry cut (Task 0.5a): which ``metadata.wardline.kind`` values the
 # scan ingest accepts. Stored as ``scan_ingest.accept_kinds`` in config.json (no
 # schema change). ``*`` (``db_files.SCAN_INGEST_ACCEPT_ALL_KINDS``) accepts every
-# kind AND the ``<engine>`` pseudo-path (the 3.3 behaviour); the default accepts
-# defects only, so engine telemetry is rejected per-finding instead of landing
-# as work. Advertised on ``GET /api/files/_schema`` as ``accept_kinds`` so a
-# producer can detect the guard.
+# kind (the 3.3 behaviour); the default accepts defect-side kinds only, so engine
+# telemetry is rejected per-finding instead of landing as work. The path plays no
+# part: a defect on the ``<engine>`` pseudo-path is accepted. Advertised on
+# ``GET /api/files/_schema`` as ``accept_kinds`` so a producer can detect the guard.
 DEFAULT_SCAN_INGEST_ACCEPT_KINDS: tuple[str, ...] = ("defect",)
 
 

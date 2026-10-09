@@ -132,8 +132,8 @@ class ScanIngestConfig(TypedDict, total=False):
     """Stage 0 (Task 0.5a) scan-ingest policy, the ``scan_ingest`` key of config.json.
 
     ``accept_kinds`` lists the ``metadata.wardline.kind`` values the ingest
-    accepts (default ``["defect"]``); ``["*"]`` accepts every kind and the
-    ``<engine>`` pseudo-path (the 3.3 behaviour). Read via
+    accepts (default ``["defect"]``); ``["*"]`` accepts every kind (the 3.3
+    behaviour). The path plays no part, ``<engine>`` included. Read via
     ``filigree.core.read_scan_ingest_accept_kinds``.
     """
 
