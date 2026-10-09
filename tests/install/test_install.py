@@ -3575,3 +3575,61 @@ class TestDoctorRedirect:
 
         assert not results["AGENTS.md"].passed
         assert "redirects" in results["AGENTS.md"].message.lower()
+
+
+class TestInstallWritesNoLoomweaveBindings:
+    """4.0 plan D-A (Task 0.11): Filigree's runtime coupling to Loomweave is cut,
+    so a full ``filigree install`` must never originate Loomweave bindings —
+    no ``loomweave.yaml`` created or touched, no ``loomweave`` server entry in
+    ``.mcp.json``, no loomweave registry backend in the project config.
+
+    Regression guard: install writes nothing Loomweave-related today; this
+    pins that so a future installer change cannot quietly reintroduce it.
+    """
+
+    def test_install_writes_no_loomweave_bindings(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from click.testing import CliRunner
+
+        from filigree.cli import cli
+
+        monkeypatch.chdir(tmp_path)
+        # Keep the Codex writer inside tmp_path.
+        fake_home = tmp_path / ".test-home"
+        fake_home.mkdir()
+        monkeypatch.setattr("filigree.install_support.integrations.Path.home", lambda: fake_home)
+        # Force the direct .mcp.json writer: with a real `claude` on PATH the
+        # installer would shell out to `claude mcp add` instead and the
+        # .mcp.json assertions below would be vacuous.
+        real_which = shutil.which
+
+        def _which_without_claude(cmd: str, *args: object, **kwargs: object) -> str | None:
+            if cmd == "claude":
+                return None
+            return real_which(cmd, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr("filigree.install_support.integrations.shutil.which", _which_without_claude)
+
+        # A pre-existing loomweave.yaml (e.g. written by `loomweave install`)
+        # must be left byte-identical.
+        seeded = tmp_path / "loomweave.yaml"
+        seeded_bytes = b"# sentinel: owned by loomweave, not filigree\nserve:\n  port: 1234\n"
+        seeded.write_bytes(seeded_bytes)
+
+        runner = CliRunner()
+        init = runner.invoke(cli, ["init", "--prefix", "lw"])
+        assert init.exit_code == 0, init.output
+        result = runner.invoke(cli, ["install"])
+        assert result.exit_code == 0, result.output
+
+        assert seeded.read_bytes() == seeded_bytes
+        stray = [p for p in tmp_path.rglob("loomweave.y*ml") if p != seeded]
+        assert stray == [], f"install created Loomweave config: {stray}"
+
+        mcp = json.loads((tmp_path / ".mcp.json").read_text())
+        servers = mcp["mcpServers"]
+        assert "filigree" in servers
+        assert not [name for name in servers if "loomweave" in name.lower()], servers
+
+        cfg = json.loads((tmp_path / WEFT_DIR_NAME / WEFT_MEMBER_SUBDIR / CONFIG_FILENAME).read_text())
+        assert "loomweave" not in cfg
+        assert cfg.get("registry_backend", "local") != "loomweave"

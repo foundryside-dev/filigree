@@ -106,6 +106,10 @@ jobs:
   live-loomweave:
     name: Live Loomweave Integration
     if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.require_live_loomweave) }}
+    # 4.0 plan D-A: Loomweave coupling is cut; lane deleted in WP-2.6.
+    # Until then a red run must not fail the workflow (scheduled, dispatched,
+    # or called from release.yml).
+    continue-on-error: true
     runs-on: ubuntu-latest
     env:
       LOOMWEAVE_STAGING_BASE_URL: ${{ secrets.LOOMWEAVE_STAGING_BASE_URL }}
@@ -138,6 +142,10 @@ jobs:
     # caught weekly rather than on a developer machine. Gated like
     # `live-loomweave`: weekly schedule + opt-in workflow_dispatch input.
     if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.require_federation_drift) }}
+    # 4.0 plan D-A: Loomweave coupling is cut; lane deleted in WP-2.6.
+    # Until then a red run must not fail the workflow (scheduled, dispatched,
+    # or called from release.yml).
+    continue-on-error: true
     runs-on: ubuntu-latest
     env:
       # Explicit per-sibling checkout overrides (tests/federation/_oracle.py
@@ -163,10 +171,12 @@ jobs:
           enable-cache: true
           python-version: "3.13"
       - run: uv sync --group dev
-      # NOTE: a red run of this scheduled lane makes the whole weekly workflow
-      # run non-success, so release.yml's live-loomweave-release-check (which
-      # filters scheduled runs on status=success) will warn even when
-      # live-loomweave itself passed. Check this job before chasing staging.
+      # NOTE: both this lane and live-loomweave are continue-on-error (D-A),
+      # so a red run no longer makes the weekly workflow run non-success. As a
+      # consequence release.yml's live-loomweave-release-check (which filters
+      # scheduled runs on status=success) can cite a "successful" run whose
+      # live-loomweave job actually failed; it is warn-only and goes with the
+      # lanes in WP-2.6. Open the run's job list before trusting that proof.
       # Sibling checkouts at their DEFAULT branch (no `ref:`), shallow. The
       # default GITHUB_TOKEN is scoped to this repository and cannot read a
       # sibling that is private: the repo owner must provision the
