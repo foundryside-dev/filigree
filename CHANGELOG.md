@@ -214,6 +214,24 @@ policy (ADR-030) records this as its one pre-4.0 exception.
   "not found after ingestion". The classic `POST /api/v1/scan-results`
   envelope applies the same policy but does not gain the new keys. No schema
   change.
+- **Agent-facing prose matches behaviour; the SessionStart hook carries your
+  actor (LX-11, LX-14, LX-16).** The managed `CLAUDE.md` / `AGENTS.md` block
+  now says how to name yourself (`filigree --actor <name>`, MCP `actor=<name>`,
+  `FILIGREE_ACTOR` for `session-context`). The skill, MCP prompt, tool
+  descriptions and `docs/agent-integration.md` / `docs/mcp.md` no longer point
+  at the pre-3.0 `.filigree/` store, frame themselves as "filigree 2.0", name
+  archived Warpline as a live tool (the `commit` parameter on `work_start` /
+  `work_claim` drops its "(warpline seam)" jargon), or document a
+  `current_assignee` CONFLICT detail (the live shape is
+  `{issue_id, observed, expected}`) and a CLI exit code 4: every error
+  envelope exits 1, so branch on `code`. `docs/agent-integration.md`'s exit-code
+  table is rewritten to match. The prose guards gain these stale claims as
+  forbidden literals. `filigree install --actor <id>` (either position; else
+  `FILIGREE_ACTOR`) writes the hook as `filigree --actor <id> session-context`
+  so the session banner lists your own claims; re-install replaces the hook
+  rather than duplicating it, and `doctor --fix` keeps an actor already
+  recorded. The banner's telemetry note now points at `filigree finding
+  export`. No schema change.
 
 ### Removed
 
