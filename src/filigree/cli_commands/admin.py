@@ -702,6 +702,30 @@ def _apply_doctor_fixes(
     fixed = 0
     fixed_check_ids: set[str] = set()
     fixed_check_names: set[str] = set()
+
+    # Published token file vs active env token (HTTP F14): realign the file to
+    # the env value siblings must send. Routed by stable code; the unconditional
+    # mint above reuses an existing (stale) file, so it does not cover this.
+    for r in results:
+        if r.passed or r.code != "federation_token_file_mismatch" or r.fix_target is None:
+            continue
+        from filigree.federation_token import reconcile_token_file
+
+        # fix_target is the exact dir the check compared (project store, or the
+        # server config dir in server mode) — reconcile that file, not a re-derived one.
+        outcome = reconcile_token_file(Path(r.fix_target))
+        ok = outcome.reconciled
+        if emit is not None:
+            if ok:
+                detail = f"rewrote {FEDERATION_TOKEN_FILENAME} to the active {outcome.env_name}"
+            else:
+                detail = f"not reconciled ({outcome.status.value})"
+            emit(f"  {'OK' if ok else '!!'} {r.name}: {detail}")
+        if ok:
+            fixed += 1
+            fixed_check_ids.add(doctor_check_id(r))
+            fixed_check_names.add(r.name)
+
     for r in results:
         if r.passed or r.name not in fixable:
             continue

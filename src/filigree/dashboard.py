@@ -138,9 +138,17 @@ def _mint_and_guard_federation_token(mint_dir: Path, *, allow_env_pin: bool) -> 
         mint_token_file,
         read_env_token,
         read_token_file,
+        reconcile_token_file,
     )
 
     minted = mint_token_file(mint_dir)
+    # HTTP F14: mint reuses an existing file even when an operator env token is
+    # active and differs — the daemon then enforces the env token while siblings
+    # read (and send) the stale file value and 401. Realign the published file to
+    # the env token. Flow is env → file only; it never writes os.environ, so it is
+    # safe in server mode too (F1 forbids the reverse: promoting a file token to a
+    # cross-project env pin). A no-op without an env token or without a file.
+    reconcile_token_file(mint_dir)
     env_tok, _ = read_env_token()
     if not (minted and not env_tok and read_token_file(mint_dir) != minted):
         return False
@@ -169,8 +177,23 @@ def _mint_and_guard_federation_token(mint_dir: Path, *, allow_env_pin: bool) -> 
     return False
 
 
+def _auth_source_label(token_env: str | None) -> str:
+    """Map a resolver *source* to the ``/api/health`` ``auth.source`` vocabulary."""
+    from filigree.federation_token import FEDERATION_TOKEN_ENV_VARS
+
+    if token_env is None:
+        return "none"
+    if token_env in FEDERATION_TOKEN_ENV_VARS:
+        return "env"
+    return "file"
+
+
 def _dashboard_auth_scope(*, federation_enabled: bool, token_env: str | None) -> dict[str, Any]:
     return {
+        # HTTP F14: which tier supplied the enforced token. ``file_matches_active``
+        # is added per request in api_health (it reads the published file live).
+        "mode": "bearer" if federation_enabled else "off",
+        "source": _auth_source_label(token_env),
         "federation": {
             "enabled": federation_enabled,
             "token_env": token_env,
@@ -1023,6 +1046,17 @@ def create_app(*, server_mode: bool = False) -> ASGIApp:
         html = (STATIC_DIR / "dashboard.html").read_text()
         return HTMLResponse(html)
 
+    def _health_auth() -> dict[str, Any]:
+        # HTTP F14: does the published token file (what same-host siblings read
+        # and send) hold the token this daemon enforces? Read live, not at
+        # create_app, so a file rewritten after boot shows up immediately. With
+        # auth off the resolver found no file token either, so "no token" on both
+        # sides counts as a match.
+        from filigree.federation_token import read_token_file
+
+        published = read_token_file(_token_store_dir) if _token_store_dir is not None else ""
+        return {**app.state.auth_scope, "file_matches_active": published == _api_token}
+
     @app.get("/api/health")
     async def api_health() -> JSONResponse:
         if server_mode and dashboard_state.project_store is not None:
@@ -1032,10 +1066,10 @@ def create_app(*, server_mode: bool = False) -> ASGIApp:
                     "mode": "server",
                     "projects": len(dashboard_state.project_store.list_projects()),
                     "version": __version__,
-                    "auth": app.state.auth_scope,
+                    "auth": _health_auth(),
                 }
             )
-        return JSONResponse({"status": "ok", "mode": EPHEMERAL_MODE, "version": __version__, "auth": app.state.auth_scope})
+        return JSONResponse({"status": "ok", "mode": EPHEMERAL_MODE, "version": __version__, "auth": _health_auth()})
 
     @app.get("/api/projects")
     async def api_projects() -> JSONResponse:

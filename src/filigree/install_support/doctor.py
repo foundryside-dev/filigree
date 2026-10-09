@@ -105,6 +105,7 @@ _CHECK_ID_BY_NAME = {
     "Ephemeral port": "dashboard.port",
     "Server daemon": "dashboard.port",
     "Federation token scope": "federation.token_scope",
+    "Federation token file": "federation.token_file",
     "API routes": "api.availability",
     "Auth config": "auth.config",
     "Scan results routes": "scanner.results",
@@ -756,6 +757,53 @@ def _doctor_federation_token_checks(project_root: Path, mode: str) -> list[Check
                     )
                 )
     return results
+
+
+def _doctor_federation_token_file_check(project_root: Path, mode: str) -> list[CheckResult]:
+    """Published token file vs the active env token (HTTP F14 / M-6).
+
+    Same-host siblings (Wardline, Loomweave) authenticate with the value they read
+    from ``<store>/federation_token``. A daemon started with an env token that
+    differs from that file enforces the env token, so every such sibling 401s.
+    Reports the mismatch only (an absent file is minted, with the env value, by
+    boot / ``--fix``); ``doctor --fix`` realigns the file via
+    :func:`filigree.federation_token.reconcile_token_file`.
+
+    Inspects the same file daemon boot reconciles: the project store for a
+    single-project daemon, the server config dir in server mode. A server-mode
+    *project* token is deliberately not compared — the daemon accepts it for its
+    own scope alongside the env pin, so it differing from the env is not a 401,
+    and rewriting it would orphan a ``.mcp.json`` that embeds it literally.
+
+    The env token is *this* shell's — it is the daemon's only when the daemon was
+    started from the same environment. Never prints a token value.
+    """
+    from filigree.federation_token import read_env_token, read_token_file, token_fingerprint
+
+    env_token, env_name = read_env_token()
+    if not env_token:
+        return []
+    if mode == "server":
+        from filigree.server import SERVER_CONFIG_DIR
+
+        store_dir = SERVER_CONFIG_DIR
+    else:
+        store_dir = resolve_store_dir(project_root)
+    file_token = read_token_file(store_dir)
+    if not file_token or file_token == env_token:
+        return []
+    return [
+        CheckResult(
+            "Federation token file",
+            False,
+            f"{store_dir}/federation_token (fingerprint {token_fingerprint(file_token)}) differs from the active "
+            f"{env_name} (fingerprint {token_fingerprint(env_token)}); a daemon started with {env_name} rejects "
+            "siblings that send the published file token (HTTP 401)",
+            fix_hint=f"Run `filigree doctor --fix` to rewrite the token file to the active {env_name} value.",
+            code="federation_token_file_mismatch",
+            fix_target=str(store_dir),
+        )
+    ]
 
 
 def _check_codex_mcp(filigree_dir: Path) -> CheckResult:
@@ -1420,6 +1468,9 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
 
     # 12b. Federation token scope divergence (server-mode, multi-store).
     results.extend(_doctor_federation_token_checks(project_root, mode))
+
+    # 12c. Published federation token file vs the active env token (any mode).
+    results.extend(_doctor_federation_token_file_check(project_root, mode))
 
     # 13. Check dashboard/API route registration without mutating records.
     results.extend(_doctor_dashboard_contract_checks(project_root))

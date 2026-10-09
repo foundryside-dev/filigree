@@ -24,6 +24,9 @@ env var remains the cross-host escape hatch.
 
 Minting is a deliberate write performed only at real daemon boot (see
 ``dashboard.run``) and by ``filigree install`` / ``filigree doctor --fix``.
+So is reconciliation (:func:`reconcile_token_file`): when tier 1 is active and
+the file holds a different value, boot and ``doctor --fix`` rewrite the file to
+the env token, so the published value is always the one the daemon accepts.
 :func:`resolve_federation_token` is strictly read-only so the many call sites
 that merely *resolve* the token (including ``create_app``, which tests invoke
 directly) never create a file as a side effect.
@@ -32,10 +35,13 @@ directly) never create a file as a side effect.
 from __future__ import annotations
 
 import contextlib
+import enum
+import hashlib
 import logging
 import os
 import secrets
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -112,7 +118,8 @@ def read_token_file(store_dir: Path) -> str:
 def mint_token_file(store_dir: Path, *, rotate: bool = False) -> str:
     """Persist (idempotently) a federation token in *store_dir* and return it.
 
-    Reuses an existing non-empty file. Otherwise records an already-exported env
+    Reuses an existing non-empty file — even one that differs from an exported
+    env token; realigning that is :func:`reconcile_token_file`'s job. Otherwise records an already-exported env
     token's value — so a freshly minted file matches a daemon already running on
     that env token — or, failing that, mints a fresh ``secrets.token_urlsafe(32)``.
     Writes ``0600``.
@@ -135,6 +142,16 @@ def mint_token_file(store_dir: Path, *, rotate: bool = False) -> str:
         return existing
     env_value, _env_name = read_env_token()
     token = env_value or secrets.token_urlsafe(32)
+    _write_token_file(store_dir, token)
+    return token
+
+
+def _write_token_file(store_dir: Path, token: str) -> bool:
+    """Atomically publish *token* to ``<store_dir>/federation_token`` (``0600``).
+
+    Returns ``True`` on success. Best-effort: an ``OSError`` (read-only mount,
+    uncreatable parent) is logged and reported as ``False`` rather than raised.
+    """
     path = store_dir / FEDERATION_TOKEN_FILENAME
     tmp_name: str | None = None
     try:
@@ -157,7 +174,77 @@ def mint_token_file(store_dir: Path, *, rotate: bool = False) -> str:
         if tmp_name is not None:
             with contextlib.suppress(OSError):
                 os.unlink(tmp_name)
-    return token
+        return False
+    return True
+
+
+def token_fingerprint(token: str) -> str:
+    """A short, non-reversible identifier for *token* (first 8 hex of sha256).
+
+    For logs and diagnostics only — never log the token value itself.
+    """
+    return hashlib.sha256(token.encode()).hexdigest()[:8]
+
+
+class ReconcileStatus(enum.Enum):
+    """Outcome of :func:`reconcile_token_file`."""
+
+    REWRITTEN = "rewritten"  # file differed from the env token and was realigned
+    ALREADY_MATCHES = "already_matches"  # file already holds the env token
+    NO_ENV = "no_env"  # no env token active — the file IS the credential
+    NO_FILE = "no_file"  # no (readable, non-empty) file — minting covers it
+    WRITE_FAILED = "write_failed"  # mismatch found but the rewrite failed
+
+
+@dataclass(frozen=True)
+class ReconcileResult:
+    status: ReconcileStatus
+    env_name: str | None = None
+
+    @property
+    def reconciled(self) -> bool:
+        return self.status is ReconcileStatus.REWRITTEN
+
+
+def reconcile_token_file(store_dir: Path) -> ReconcileResult:
+    """Realign the published token file in *store_dir* to the active env token.
+
+    The file is Filigree's *published* token: same-host siblings (Wardline,
+    Loomweave) read it to authenticate. When an env token is active (tier 1) it
+    is what the daemon enforces, so a file holding a different value makes every
+    sibling that trusts the file 401 (HTTP F14). This rewrites the file to the env
+    token — only when the env token is set AND the file exists with a different
+    non-empty value; an absent file is :func:`mint_token_file`'s job (it already
+    writes an exported env token through). Same atomic ``0600`` publish as minting.
+
+    Never touches ``os.environ`` (the flow is env → file only, never the reverse).
+    Emits a ``token_file_reconciled`` record carrying fingerprints, never values.
+    Called at daemon boot (``dashboard.run``) and by ``filigree doctor --fix`` —
+    never from :func:`resolve_federation_token`, which stays read-only.
+    """
+    env_token, env_name = read_env_token()
+    if not env_token:
+        return ReconcileResult(ReconcileStatus.NO_ENV)
+    file_token = read_token_file(store_dir)
+    if not file_token:
+        return ReconcileResult(ReconcileStatus.NO_FILE, env_name)
+    if file_token == env_token:
+        return ReconcileResult(ReconcileStatus.ALREADY_MATCHES, env_name)
+    if not _write_token_file(store_dir, env_token):
+        return ReconcileResult(ReconcileStatus.WRITE_FAILED, env_name)
+    logger.info(
+        "token_file_reconciled",
+        extra={
+            "tool": "federation_token",
+            "args_data": {
+                "store_dir": str(store_dir),
+                "env_var": env_name,
+                "old_fingerprint": token_fingerprint(file_token),
+                "new_fingerprint": token_fingerprint(env_token),
+            },
+        },
+    )
+    return ReconcileResult(ReconcileStatus.REWRITTEN, env_name)
 
 
 def resolve_federation_token(store_dir: Path | None) -> tuple[str, str | None]:

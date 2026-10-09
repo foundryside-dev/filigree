@@ -223,6 +223,25 @@ policy (ADR-030) records this as its one pre-4.0 exception.
   `doctor --fix` deletes it. A `Future` release with children or dependencies
   is left alone, and a release the user creates themselves is unaffected.
 
+### Fixed
+
+- **Sibling tools no longer get HTTP 401 when the daemon runs on an env
+  token.** Wardline and Loomweave authenticate with the token they read from
+  `<store>/federation_token`. A daemon started with `WEFT_FEDERATION_TOKEN`
+  enforced that value even when the file held a different, stale one, so every
+  sibling that sent the file token was rejected. At daemon boot (both
+  single-project and server mode) the file is now rewritten to the active env
+  token, atomically and `0600`, and a `token_file_reconciled` log record is
+  written with token fingerprints, never values. The rewrite only goes from
+  env to file: a server-mode file token is still never promoted to a
+  cross-project env pin. `/api/health` `auth` gains three keys alongside the
+  existing ones: `mode` (`bearer`/`off`), `source` (`env`/`file`/`none`) and
+  `file_matches_active`, which is read on every request. `filigree doctor`
+  reports when the file that boot would rewrite (the project store, or the
+  server config dir in server mode) differs from the shell's env token
+  (`federation_token_file_mismatch`, check id `federation.token_file`), and
+  `doctor --fix` rewrites it. (HTTP F14, M-6)
+
 ## [3.3.0] - 2026-09-02
 
 ### Added

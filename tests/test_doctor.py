@@ -2245,6 +2245,102 @@ class TestDoctorFederationTokenChecks:
 
 
 # ---------------------------------------------------------------------------
+# Federation token file vs active env token (HTTP F14 / M-6)
+# ---------------------------------------------------------------------------
+
+
+class TestDoctorFederationTokenFileMismatch:
+    """Siblings read ``<store>/federation_token``; an env token that differs from
+    it means the daemon (started with that env) 401s every sibling. Doctor
+    reports the mismatch and ``--fix`` realigns the file to the env token."""
+
+    def _clear_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for v in ("WEFT_FEDERATION_TOKEN", "FILIGREE_FEDERATION_API_TOKEN", "FILIGREE_API_TOKEN"):
+            monkeypatch.delenv(v, raising=False)
+
+    def test_doctor_flags_mismatch_and_fix_reconciles(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from filigree.cli_commands.admin import _apply_doctor_fixes
+
+        self._clear_env(monkeypatch)
+        project = _make_project(tmp_path)
+        token_file = project / FILIGREE_DIR_NAME / "federation_token"
+        token_file.write_text("stale-file-tok\n")
+        monkeypatch.setenv("WEFT_FEDERATION_TOKEN", "env-active-tok")
+
+        results = run_doctor(project)
+        mismatch = [r for r in results if r.code == "federation_token_file_mismatch"]
+        assert len(mismatch) == 1, [r.name for r in results]
+        assert mismatch[0].passed is False
+        assert "WEFT_FEDERATION_TOKEN" in mismatch[0].message
+        assert "doctor --fix" in mismatch[0].fix_hint
+        # Never leak a token value into human/JSON doctor output.
+        assert "stale-file-tok" not in mismatch[0].message
+        assert "env-active-tok" not in mismatch[0].message
+        assert doctor_check_id(mismatch[0]) == "federation.token_file"
+
+        monkeypatch.chdir(project)
+        fixed, fixed_ids, _names = _apply_doctor_fixes(results, emit=None)
+        assert fixed >= 1
+        assert "federation.token_file" in fixed_ids
+        assert token_file.read_text().strip() == "env-active-tok"
+        assert oct(token_file.stat().st_mode & 0o777) == oct(0o600)
+
+        again = run_doctor(project)
+        assert not any(r.code == "federation_token_file_mismatch" for r in again)
+
+    @pytest.mark.parametrize(
+        ("env", "file"),
+        [
+            (None, "file-tok"),  # no env → file is the credential, nothing to reconcile
+            ("same-tok", "same-tok"),  # aligned
+            ("env-tok", None),  # no file → boot/install mint writes the env value
+        ],
+    )
+    def test_no_mismatch_reported(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, env: str | None, file: str | None) -> None:
+        self._clear_env(monkeypatch)
+        project = _make_project(tmp_path)
+        if file is not None:
+            (project / FILIGREE_DIR_NAME / "federation_token").write_text(file + "\n")
+        if env is not None:
+            monkeypatch.setenv("WEFT_FEDERATION_TOKEN", env)
+
+        results = run_doctor(project)
+        assert not any(r.code == "federation_token_file_mismatch" for r in results)
+
+    def test_server_mode_checks_home_file_not_project_token(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Server mode: boot reconciles the server config dir, so doctor compares
+        that file. A per-project token differing from the env pin is accepted for
+        its own scope (not a 401) and must not be flagged or rewritten — a
+        server-mode .mcp.json embeds it literally."""
+        from filigree.cli_commands.admin import _apply_doctor_fixes
+
+        self._clear_env(monkeypatch)
+        (tmp_path / "p").mkdir()
+        project = _make_project(tmp_path / "p")
+        write_config(project / FILIGREE_DIR_NAME, {"prefix": "tst", "version": 1, "mode": "server"})
+        project_file = project / FILIGREE_DIR_NAME / "federation_token"
+        project_file.write_text("tok-proj\n")
+        config_dir = tmp_path / "_srvcfg"
+        config_dir.mkdir()
+        (config_dir / "server.json").write_text(json.dumps({"port": 8377, "projects": {}}))
+        home_file = config_dir / "federation_token"
+        home_file.write_text("stale-home-tok\n")
+        monkeypatch.setattr("filigree.server.SERVER_CONFIG_DIR", config_dir)
+        monkeypatch.setattr("filigree.server.SERVER_CONFIG_FILE", config_dir / "server.json")
+        monkeypatch.setenv("WEFT_FEDERATION_TOKEN", "env-pin")
+
+        results = run_doctor(project)
+        mismatch = [r for r in results if r.code == "federation_token_file_mismatch"]
+        assert len(mismatch) == 1
+        assert mismatch[0].fix_target == str(config_dir)
+
+        monkeypatch.chdir(project)
+        _apply_doctor_fixes(results, emit=None)
+        assert home_file.read_text().strip() == "env-pin"
+        assert project_file.read_text().strip() == "tok-proj"  # project token untouched
+
+
+# ---------------------------------------------------------------------------
 # run_doctor — empty legacy "Future" release (init no longer seeds one)
 # ---------------------------------------------------------------------------
 
