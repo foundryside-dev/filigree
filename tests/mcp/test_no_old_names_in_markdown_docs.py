@@ -124,6 +124,13 @@ def test_stale_claim_rules_fire_and_spare_identifiers() -> None:
         'details: {current_assignee: "agent-1"}',
         "A CONFLICT exits with code 4.",
         "CONFLICT → CLI exit 4, retryable",
+        "Exit status 4 means conflict.",
+        # Review round 1: globs are unconditional, the archived exemption is
+        # same-sentence only, and a bare backticked name is a tool claim.
+        "Prefer the `mcp__legis__*` tools for overrides. Closed issues are archived after 30 days.",
+        'Use Warpline to compute blast radius; "state" was retired as a word.',
+        "Fall back to the `legis` CLI.",
+        "Run `warpline` before claiming done.",
     ):
         assert stale_claims(stale), stale
     assert stale_claims("Protocols for filigree 2.0.", skill=True)
@@ -131,6 +138,8 @@ def test_stale_claim_rules_fire_and_spare_identifiers() -> None:
         "`legis_client.py` and `LEGIS_URL` are code identifiers.",
         "The `warpline_worklist_ingest` tool reads `warpline.reverify_worklist.v1`.",
         "The actor defaults to 'warpline'.",
+        "Identity recorded as attached_by (default 'warpline').",
+        "Filed items carry the producer labels (`warpline`, `federation`).",
         "Legis is retired and is never consulted.",
         "The Warpline producer is archived.",
         "The store lives in `.weft/filigree/`.",

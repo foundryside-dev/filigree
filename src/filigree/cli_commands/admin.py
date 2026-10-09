@@ -421,6 +421,12 @@ def _run_install_step(name: str, installer: Callable[[], tuple[bool, str]]) -> t
     default=None,
     help="Installation mode (default: preserve existing or ephemeral; ethereal is the pre-3.3.0 alias)",
 )
+@click.option(
+    "--no-actor",
+    "no_actor",
+    is_flag=True,
+    help="Write the SessionStart hook as plain `filigree session-context`, dropping any recorded actor",
+)
 @click.pass_context
 def install(
     ctx: click.Context,
@@ -433,6 +439,7 @@ def install(
     skills_only: bool,
     codex_skills_only: bool,
     mode: str | None,
+    no_actor: bool,
 ) -> None:
     """Install filigree into the current project.
 
@@ -441,8 +448,11 @@ def install(
 
     ``--actor`` (either position; else ``FILIGREE_ACTOR``) is written into the
     SessionStart hook as ``filigree --actor <id> session-context`` so the
-    session banner scopes your own claims.
+    session banner scopes your own claims; an existing hook keeps its actor
+    unless ``--no-actor`` is passed, which writes the plain command.
     """
+    if no_actor and explicit_actor(ctx) is not None:
+        raise click.UsageError("--actor and --no-actor are mutually exclusive")
     from filigree.install import (
         ensure_filigree_dir_gitignore,
         ensure_gitignore,
@@ -546,7 +556,11 @@ def install(
         (
             install_all or hooks_only,
             "Claude Code hooks",
-            lambda: install_claude_code_hooks(project_root, actor=_install_hook_actor(ctx)),
+            lambda: (
+                install_claude_code_hooks(project_root, clear_actor=True)
+                if no_actor
+                else install_claude_code_hooks(project_root, actor=_install_hook_actor(ctx))
+            ),
         ),
         (
             install_all or skills_only,
@@ -600,6 +614,16 @@ def install(
         sys.exit(1)
 
     click.echo('Next: filigree create "My first issue"')
+
+
+# ActorCommand injects a generic post-verb ``--actor``; on ``install`` it also
+# decides the SessionStart hook's actor, so say so (and name the way out).
+for _param in install.params:
+    if _param.name == ActorCommand._ACTOR_DEST and isinstance(_param, click.Option):
+        _param.help = (
+            "Actor written into the SessionStart hook (`filigree --actor <id> session-context`); "
+            "default FILIGREE_ACTOR, else the hook's existing actor. --no-actor removes it."
+        )
 
 
 def _emit_doctor_json(

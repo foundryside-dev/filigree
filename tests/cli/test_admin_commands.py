@@ -477,6 +477,31 @@ class TestInstallCli:
         assert result.exit_code == 0, result.output
         assert self._session_cmds(project) == ["filigree session-context"]
 
+    def test_install_hooks_no_actor_removes_a_recorded_actor(
+        self, cli_in_project: tuple[CliRunner, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Review round 1: once an actor is baked in, ``--no-actor`` is the way
+        back to the plain command (a bare re-install keeps the actor)."""
+        runner, project = cli_in_project
+        monkeypatch.setenv("FILIGREE_ACTOR", "dave")
+        monkeypatch.setattr("filigree.install_support.hooks.find_filigree_command", lambda: ["filigree"])
+        assert runner.invoke(cli, ["install", "--hooks", "--actor", "alice"]).exit_code == 0
+        result = runner.invoke(cli, ["install", "--hooks", "--no-actor"])
+        assert result.exit_code == 0, result.output
+        assert self._session_cmds(project) == ["filigree session-context"]
+
+    def test_install_actor_and_no_actor_conflict(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        result = runner.invoke(cli, ["install", "--hooks", "--actor", "alice", "--no-actor"])
+        assert result.exit_code == 2
+        assert "mutually exclusive" in result.output
+
+    def test_install_help_names_the_hook_actor_and_no_actor(self, cli_runner: CliRunner) -> None:
+        result = cli_runner.invoke(cli, ["install", "--help"])
+        assert result.exit_code == 0
+        assert "SessionStart hook" in result.output
+        assert "--no-actor" in result.output
+
     def test_install_rejects_an_invalid_actor(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
         result = runner.invoke(cli, ["install", "--hooks", "--actor", "bad\nactor"])

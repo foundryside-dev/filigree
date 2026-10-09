@@ -1888,6 +1888,13 @@ class TestInstallHooksActor:
         self._install(tmp_path)
         assert self._session_cmds(tmp_path) == ["/mock/venv/bin/filigree --actor alice session-context"]
 
+    def test_clear_actor_writes_the_plain_command(self, tmp_path: Path) -> None:
+        self._install(tmp_path, actor="alice")
+        with patch("filigree.install_support.hooks.find_filigree_command", return_value=self.MOCK_TOKENS):
+            ok, msg = install_claude_code_hooks(tmp_path, clear_actor=True)
+        assert ok, msg
+        assert self._session_cmds(tmp_path) == ["/mock/venv/bin/filigree session-context"]
+
     def test_actor_with_spaces_is_shell_quoted(self, tmp_path: Path) -> None:
         self._install(tmp_path, actor="agent one")
         assert self._session_cmds(tmp_path) == ["/mock/venv/bin/filigree --actor 'agent one' session-context"]

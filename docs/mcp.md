@@ -922,7 +922,7 @@ is required (or accepted).
 
 ### Federation Consumer Bindings
 
-The write-capable half of the Warpline↔Filigree seam. Warpline was archived on
+The write-capable half of the seam with the archived Warpline producer. Warpline was archived on
 2026-10-01; this consumer stays in 3.x for any worklist already produced and is
 removed in 4.0. The producer never auto-filed; Filigree consumes a worklist only
 on explicit action.

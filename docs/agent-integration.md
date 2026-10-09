@@ -166,7 +166,7 @@ The exit status says only *whether* a verb failed. Branch on the envelope's `cod
 | 0 | success (including empty results) |
 | 1 | any error envelope from a verb — `CONFLICT`, `VALIDATION`, `NOT_FOUND`, `INVALID_TRANSITION`, `NOT_INITIALIZED`, `SCHEMA_MISMATCH`, `IO`, … |
 | 2 | click usage error (unknown option, missing argument) |
-| 3 | forward schema mismatch reported by `filigree init`, `filigree doctor` or `filigree sei-backfill` |
+| 3 | forward schema mismatch reported by `filigree init`, `filigree doctor`, `filigree sei-backfill`, or dashboard/server startup |
 
 ## Example: Multi-Agent Setup
 

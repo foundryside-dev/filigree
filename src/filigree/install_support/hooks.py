@@ -345,7 +345,7 @@ def _ensure_pre_tool_use_hook(settings: dict[str, Any], ensure_dashboard_cmd: st
 # ---------------------------------------------------------------------------
 
 
-def install_claude_code_hooks(project_root: Path, *, actor: str | None = None) -> tuple[bool, str]:
+def install_claude_code_hooks(project_root: Path, *, actor: str | None = None, clear_actor: bool = False) -> tuple[bool, str]:
     """Register ``filigree session-context`` and ``filigree ensure-dashboard``
     as Claude Code SessionStart hooks in ``.claude/settings.json``.
 
@@ -356,7 +356,8 @@ def install_claude_code_hooks(project_root: Path, *, actor: str | None = None) -
     ``filigree --actor <actor> session-context`` so the banner can scope the
     agent's own claims. With no *actor*, an actor already recorded in the
     existing hook is kept (``doctor --fix`` re-runs this without one); with
-    neither, the plain command is written.
+    neither, the plain command is written. ``clear_actor=True`` always writes
+    the plain command, dropping any recorded actor.
 
     Idempotent — won't duplicate existing entries.  Re-running upgrades
     bare or stale absolute-path commands to the current binary location.
@@ -393,7 +394,12 @@ def install_claude_code_hooks(project_root: Path, *, actor: str | None = None) -
     # shell command is safe on all platforms (e.g. Windows paths with spaces).
     filigree_tokens = find_filigree_command()
     filigree_prefix = shlex.join(filigree_tokens)
-    hook_actor = actor if actor is not None else _hook_actor(_extract_hook_tokens(settings, SESSION_CONTEXT_COMMAND))
+    if clear_actor:
+        hook_actor: str | None = None
+    elif actor is not None:
+        hook_actor = actor
+    else:
+        hook_actor = _hook_actor(_extract_hook_tokens(settings, SESSION_CONTEXT_COMMAND))
     actor_tokens = ["--actor", hook_actor] if hook_actor else []
     session_context_cmd = shlex.join([*filigree_tokens, *actor_tokens, "session-context"])
     ensure_dashboard_cmd = f"{filigree_prefix} ensure-dashboard"
