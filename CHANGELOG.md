@@ -9,8 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
-Two claim-verb contracts change in this minor on purpose: they closed bypasses
-where any actor could undo or release another agent's work (MCP F1, F3). They
+Three claim-verb contracts change in this minor on purpose: they closed bypasses
+where any actor could undo, release or keep alive another agent's work (MCP F1,
+F3, and the heartbeat follow-up to F3). They
 ship without the usual one-minor deprecation; the forthcoming deprecation
 policy (ADR-030) records this as its one pre-4.0 exception.
 
@@ -46,6 +47,20 @@ policy (ADR-030) records this as its one pre-4.0 exception.
   its releases are recorded as `released_by_override` by `dashboard`. Python:
   `release_claim(issue_id, *, actor, expected_assignee=None, override=False,
   reason="", revert_status=True) -> Issue | None` (`None` is the no-op).
+- **`work_heartbeat` is holder-checked; `actor` is required.** Same rule as
+  `work_release`: `actor` must be the current holder, or the call returns
+  `CONFLICT` and the lease is not extended. Before, naming the holder in
+  `expected_assignee` let any actor extend it, a blank actor skipped the check,
+  and MCP filled in a missing `actor` with the holder. So any peer could keep an
+  abandoned claim alive and hide it from `stale-claims` → `reclaim`.
+  `expected_assignee` is now only an extra compare-and-swap guard.
+  `override: true` is the coordinator bypass and is recorded as a new
+  `heartbeat_by_override` event (not undoable). MCP `work_heartbeat` returns
+  `VALIDATION` when `actor` is omitted; a holder that relied on the old default
+  must now pass `actor`. CLI: `filigree heartbeat-work` checks the global
+  `--actor` the same way and gains `--override`. There is no HTTP heartbeat
+  route. Python: `heartbeat_work(issue_id, *, actor, expected_assignee=None,
+  override=False, lease_hours=48)`.
 
 ### Added
 
@@ -128,11 +143,17 @@ policy (ADR-030) records this as its one pre-4.0 exception.
 
 - **`work_start_next` / `work_claim_next` are retry-safe (MCP F4).** A retried
   call no longer claims a second issue and strands the first for the 48 h
-  lease. If the assignee already holds an in-progress claim (`work_claim_next`:
-  any live claim), that issue is returned with `already_holding: true` and
-  nothing is written. Both tools accept an optional `client_request_id`. A
-  retry with the same id returns the issue that request claimed, if the
-  assignee still holds it. The id is stored on the `claimed` event's comment
+  lease. If the assignee claimed an issue within the last 60 seconds and still
+  holds it in progress (`work_claim_next`: any live claim), that issue is
+  returned with `already_holding: true` and nothing is written. Both tools
+  accept an optional `client_request_id`. A retry with the same id returns the
+  issue that request claimed, at any age, if the assignee still holds it. An
+  older held claim does not block new work: the call claims the next ready
+  issue, as before. Known limitation: sessions that share one actor (the
+  default when the SessionStart hook carries a fixed `--actor`) are told apart
+  only by this 60-second retry window until per-session keying lands. A second
+  session that calls within 60 seconds of the first session's claim is handed
+  that claim. The id is stored on the `claimed` event's comment
   (no schema change). Every success response now carries `already_holding`.
   The CLI `claim-next` / `start-next-work` follow the same rule and print
   `Already holding …`. A new table-driven call-twice harness

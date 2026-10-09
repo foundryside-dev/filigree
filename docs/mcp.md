@@ -434,10 +434,14 @@ skipped. Pass `advance=true` to make them startable via the multi-hop soft walk.
 | `actor` | string | no | Agent identity (defaults to assignee) |
 | `client_request_id` | string | no | Idempotency key: a retry with the same id returns the issue that request claimed, if still held |
 
-`work_start_next` and `work_claim_next` are retry-safe: when the assignee
-already holds an in-progress claim (`work_claim_next`: any live claim), that
-issue is returned with `already_holding: true` and nothing is written, instead
-of claiming a second issue. Every success response carries `already_holding`.
+`work_start_next` and `work_claim_next` are retry-safe. When the assignee
+claimed an issue within the last 60 seconds and still holds it in progress
+(`work_claim_next`: any live claim), that issue is returned with
+`already_holding: true` and nothing is written, instead of claiming a second
+issue. A retry with the same `client_request_id` gets the issue that request
+claimed back at any age. An older held claim does not block new work: the
+call claims the next ready issue. Every success response carries
+`already_holding`.
 
 #### `work_claim`
 
@@ -494,9 +498,13 @@ it returns `VALIDATION` with `details.migration`.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `issue_id` | string | yes | Issue ID |
-| `actor` | string | no | Agent identity for audit trail and default holder check |
-| `expected_assignee` | string | no | Only heartbeat when the current assignee matches this value |
+| `actor` | string | yes | Agent identity; must be the current holder unless `override` is true. Omitting it returns `VALIDATION` |
+| `expected_assignee` | string | no | Extra compare-and-swap guard: the current assignee must also equal this value. Never authorizes a non-holder |
+| `override` | boolean | no | Coordinator refresh of a claim `actor` does not hold; recorded as a `heartbeat_by_override` event |
 | `lease_hours` | integer | no | Lease duration from this heartbeat (default 48) |
+
+Holder-checked: a heartbeat by anyone other than the holder returns `CONFLICT`,
+so a peer cannot keep an abandoned claim's lease alive.
 
 #### `work_stale_list`
 

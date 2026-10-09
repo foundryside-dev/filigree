@@ -23,6 +23,7 @@ EventType = Literal[
     "released",
     "released_by_override",
     "heartbeat",
+    "heartbeat_by_override",
     "reclaimed",
     "reopened",
     "dependency_added",
@@ -89,6 +90,7 @@ def is_reversible_event_type(event_type: EventType) -> bool:
             | "released"
             | "released_by_override"
             | "heartbeat"
+            | "heartbeat_by_override"
             | "reclaimed"
             | "reopened"
             | "transition_warning"

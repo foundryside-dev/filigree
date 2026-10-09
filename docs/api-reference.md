@@ -383,15 +383,19 @@ def heartbeat_work(
     self,
     issue_id: str,
     *,
-    actor: str = "",
+    actor: str,
     expected_assignee: str | None = None,
+    override: bool = False,
     lease_hours: int = 48,
 ) -> Issue
 ```
 
-Refreshes liveness metadata for a claimed, non-done issue. The current assignee
-must match `expected_assignee` when provided, otherwise `actor` is treated as the
-expected holder when non-empty. Updates `last_heartbeat_at` and
+Refreshes liveness metadata for a claimed, non-done issue. Holder-checked like
+`release_claim`: without `override`, `actor` must be the current assignee
+(`ClaimConflictError` otherwise; `ValueError` for a blank actor).
+`expected_assignee` is an additional compare-and-swap guard, never
+authorization. `override=True` drops the actor check and records the refresh as
+a `heartbeat_by_override` event. Updates `last_heartbeat_at` and
 `claim_expires_at`.
 
 #### `get_stale_claims`

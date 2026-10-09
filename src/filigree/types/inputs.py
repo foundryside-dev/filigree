@@ -159,8 +159,9 @@ class ReleaseMyClaimsArgs(TypedDict):
 
 class HeartbeatWorkArgs(TypedDict):
     issue_id: str
-    actor: NotRequired[str]
+    actor: str
     expected_assignee: NotRequired[str]
+    override: NotRequired[bool]
     lease_hours: NotRequired[int]
 
 

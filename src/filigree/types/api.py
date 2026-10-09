@@ -215,9 +215,10 @@ class IssueWithUnblocked(PublicIssue):
 class ClaimNextResponse(PublicIssue):
     """Claimed issue with human-readable selection reason.
 
-    ``already_holding`` is true when the caller already held a live claim (or
-    replayed a ``client_request_id``) and was handed that issue back instead
-    of a second claim — the retry-safe answer (MCP F4).
+    ``already_holding`` is true when the caller already held a live claim made
+    within the 60 s retry window (or replayed a ``client_request_id``) and was
+    handed that issue back instead of a second claim — the retry-safe answer
+    (MCP F4).
     """
 
     selection_reason: str

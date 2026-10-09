@@ -70,7 +70,8 @@ class Issue:
     data_warnings: list[str] = field(default_factory=list)
     # Transient, never stored or serialized by ``to_dict``: set by
     # ``claim_next`` / ``start_next_work`` when they hand back a claim the
-    # assignee already holds instead of making a new one (MCP F4). Surfaces
+    # assignee already holds (made within the 60 s retry window, or replayed by
+    # ``client_request_id``) instead of making a new one (MCP F4). Surfaces
     # add it to their claim-next responses explicitly.
     already_holding: bool = False
     # Transient, never stored or serialized by ``to_dict``: advisory warnings

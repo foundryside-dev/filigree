@@ -1217,7 +1217,17 @@ def release_my_claims_cmd(
 
 @click.command("heartbeat-work", cls=ActorCommand)
 @click.argument("issue_id")
-@click.option("--expected-assignee", default=None, help="Expected current assignee; defaults to global --actor.")
+@click.option(
+    "--expected-assignee",
+    default=None,
+    help="Extra compare-and-swap guard on the current assignee; never authorizes a non-holder.",
+)
+@click.option(
+    "--override",
+    is_flag=True,
+    default=False,
+    help="Coordinator refresh of a claim the --actor does not hold (recorded as heartbeat_by_override).",
+)
 @click.option("--lease-hours", default=48, type=int, help="Lease duration from this heartbeat.")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.pass_context
@@ -1225,10 +1235,11 @@ def heartbeat_work_cmd(
     ctx: click.Context,
     issue_id: str,
     expected_assignee: str | None,
+    override: bool,
     lease_hours: int,
     as_json: bool,
 ) -> None:
-    """Refresh claim liveness metadata for the current holder."""
+    """Refresh claim liveness metadata. Holder-checked: the global --actor must hold the claim."""
     _range_check_int(lease_hours, "lease_hours", min_val=1, max_val=8760, as_json=as_json)
     with get_db() as db:
         try:
@@ -1236,6 +1247,7 @@ def heartbeat_work_cmd(
                 issue_id,
                 actor=ctx.obj["actor"],
                 expected_assignee=expected_assignee,
+                override=override,
                 lease_hours=lease_hours,
             )
         except KeyError:

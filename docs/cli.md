@@ -510,6 +510,10 @@ Claim the highest-priority ready issue.
 | `--priority-min` | 0-4 | Minimum priority (0=critical) |
 | `--priority-max` | 0-4 | Maximum priority |
 
+Retry-safe: if the assignee claimed an issue in the last 60 seconds and still holds it, that issue is returned
+(`Already holding …`, `already_holding: true` in `--json`) instead of a second claim. An older held claim does not
+block new work.
+
 ### `release`
 
 Release a claim you hold by clearing its assignee. Holder-checked: the global `--actor` must hold the claim; if
@@ -543,13 +547,16 @@ scratch or review work.
 
 ### `heartbeat-work`
 
-Refresh claim liveness for a claimed issue. By default the global `--actor` is
-treated as the expected holder; coordinators can pass `--expected-assignee`.
+Refresh claim liveness for a claimed issue. Holder-checked: the global `--actor`
+must hold the claim, or the command returns `CONFLICT`. `--expected-assignee` is
+an extra compare-and-swap guard, never authorization. `--override` is the
+coordinator refresh, recorded as `heartbeat_by_override`.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `id` | string | Issue ID (positional) |
-| `--expected-assignee` | string | Expected current assignee |
+| `--expected-assignee` | string | Extra compare-and-swap guard on the current assignee |
+| `--override` | flag | Coordinator refresh of a claim the `--actor` does not hold |
 | `--lease-hours` | integer | Lease duration from this heartbeat (default 48) |
 
 ### `stale-claims`
@@ -596,6 +603,8 @@ The working status is type-specific (the unique wip-category status reachable in
 Claim AND transition the highest-priority ready issue. Returns `{status: "empty", reason: ...}` when no matching issue exists.
 
 Candidates that are ready but not single-hop startable (e.g. `triage` bugs) are **skipped**, so the command returns the next startable issue rather than failing. Pass `--advance` to make such candidates startable via the multi-hop soft walk instead of skipping them.
+
+Retry-safe: if the assignee started an issue in the last 60 seconds and still holds it in progress, that issue is returned (`Already holding …`, `already_holding: true` in `--json`) instead of a second one. An older held claim does not block new work.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|

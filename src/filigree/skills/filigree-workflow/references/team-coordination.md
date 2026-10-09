@@ -184,7 +184,8 @@ filigree add-comment <issue-id> "Reclaimed: previous agent did not complete"
 ```
 
 To keep your own claims from going stale, heartbeat long-running work and
-drop everything you still hold at session end:
+drop everything you still hold at session end. Heartbeat is holder-checked:
+only the holder (`--actor` / MCP `actor`, required) can extend its own lease.
 
 ```bash
 filigree --actor <you> heartbeat-work <issue-id>    # MCP: work_heartbeat

@@ -691,16 +691,26 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
             name="heartbeat_work",
             description=(
                 "Refresh claim liveness metadata for a claimed issue. "
-                "By default actor is treated as the expected current holder; pass expected_assignee for coordinator flows."
+                "Holder-checked: actor is required and must be the current holder, or the call returns CONFLICT. "
+                "expected_assignee is only an extra compare-and-swap guard, never authorization. "
+                "override=true is the coordinator bypass and is recorded as a heartbeat_by_override event."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "issue_id": {"type": "string", "description": "Issue ID to heartbeat"},
-                    "actor": {"type": "string", "description": "Agent/user identity for audit trail and holder check"},
+                    "actor": {"type": "string", "description": "Agent/user identity; must be the current holder unless override=true"},
                     "expected_assignee": {
                         "type": "string",
-                        "description": "Only heartbeat when the current assignee matches this value.",
+                        "description": (
+                            "Extra compare-and-swap guard: the current assignee must also equal this value (else "
+                            "CONFLICT, even with override). Does not authorize refreshing someone else's claim."
+                        ),
+                    },
+                    "override": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Coordinator refresh of a claim actor does not hold; recorded as heartbeat_by_override.",
                     },
                     "lease_hours": {
                         "type": "integer",
@@ -709,7 +719,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                         "description": "Lease duration from this heartbeat, in hours.",
                     },
                 },
-                "required": ["issue_id"],
+                "required": ["issue_id", "actor"],
             },
         ),
         Tool(
@@ -766,7 +776,8 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
             description=(
                 "Claim the highest-priority open-category ready issue by setting assignee. "
                 "Does NOT change status — use issue_update to advance through workflow after claiming. "
-                "Retry-safe: if the assignee already holds a live claim, that issue is returned with "
+                "Retry-safe: if the assignee claimed an issue within the last 60 s and still holds it (or "
+                "client_request_id matches the request that claimed it), that issue is returned with "
                 "already_holding=true instead of claiming a second one. "
                 "Identity: provide assignee or actor — whichever is omitted defaults from the other."
             ),
@@ -858,7 +869,8 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                 "Candidates that are ready but not single-hop startable (e.g. triage bugs) are skipped; pass advance=true "
                 "to make them startable via the multi-hop soft walk. "
                 "Returns the transitioned issue, or {status: 'empty'} when no ready issue matches. "
-                "Retry-safe: if the assignee already holds an in-progress claim, that issue is returned with "
+                "Retry-safe: if the assignee started an issue within the last 60 s and still holds it (or "
+                "client_request_id matches the request that claimed it), that issue is returned with "
                 "already_holding=true instead of starting a second one. "
                 "Identity: provide assignee or actor — whichever is omitted defaults from the other."
             ),
@@ -1574,30 +1586,27 @@ async def _handle_release_my_claims(arguments: dict[str, Any]) -> list[TextConte
 
 async def _handle_heartbeat_work(arguments: dict[str, Any]) -> list[TextContent]:
     args = _parse_args(arguments, HeartbeatWorkArgs)
-    # When the caller omits actor, default the audit identity to the issue's
-    # current assignee rather than the literal string 'mcp'. The previous
-    # default ('mcp') failed the implicit holder check whenever the actual
-    # holder forgot to pass actor: the rightful holder's heartbeat would
-    # CONFLICT with "expected 'mcp'", silently letting the lease expire.
-    # (filigree-cb980eee0d, P2.5 senior-user MCP review.)
+    # Final review I5: ``actor`` is required and must be the holder (unless
+    # override). The old default-to-holder (filigree-cb980eee0d, P2.5) made the
+    # holder check empty for any caller who left ``actor`` out, so any peer
+    # could keep a stale lease alive.
+    raw_actor = args.get("actor")
+    if raw_actor is None:
+        return _text(
+            ErrorResponse(
+                error="actor is required: pass the holder's identity (or override=true as coordinator)",
+                code=ErrorCode.VALIDATION,
+            )
+        )
+    actor, actor_err = _validate_actor(raw_actor)
+    if actor_err:
+        return actor_err
     expected_assignee = args.get("expected_assignee")
     if expected_assignee is not None and not isinstance(expected_assignee, str):
         return _text(ErrorResponse(error="expected_assignee must be a string", code=ErrorCode.VALIDATION))
-    raw_actor = args.get("actor")
-    if raw_actor is None:
-        # No explicit actor — read the current holder so the audit row is
-        # attributed correctly and the holder check is a no-op (caller
-        # didn't ask for one).
-        tracker = get_db()
-        try:
-            issue = tracker.get_issue(args["issue_id"])
-        except KeyError:
-            return _text(ErrorResponse(error=f"Issue not found: {args['issue_id']}", code=ErrorCode.NOT_FOUND))
-        actor = issue.assignee or "mcp"
-    else:
-        actor, actor_err = _validate_actor(raw_actor)
-        if actor_err:
-            return actor_err
+    override = args.get("override", False)
+    if not isinstance(override, bool):
+        return _text(ErrorResponse(error="override must be a boolean", code=ErrorCode.VALIDATION))
     lease_hours = args.get("lease_hours", 48)
     lease_err = _validate_int_range(lease_hours, "lease_hours", min_val=1)
     if lease_err:
@@ -1608,6 +1617,7 @@ async def _handle_heartbeat_work(arguments: dict[str, Any]) -> list[TextContent]
             args["issue_id"],
             actor=actor,
             expected_assignee=expected_assignee,
+            override=override,
             lease_hours=lease_hours,
         )
         refresh_summary()
