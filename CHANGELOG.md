@@ -209,9 +209,10 @@ policy (ADR-030) records this as its one pre-4.0 exception.
   `unchanged: [{id, reason: "already_present"}]` instead of a bare
   `succeeded: []`; `succeeded` remains the newly-created ids. `stats` gains
   `requested` (findings in the request) and `applied` (created + updated).
-  `warnings[]` stays operator text. Additive on the wire: Wardline's client
-  already maps unknown per-finding failure codes to `rejected`
-  (`_normalize_failure_reason`). The frozen classic `POST /api/v1/scan-results`
+  `warnings[]` stays operator text. Additive on the wire: a consumer must treat
+  an unknown code as a generic rejection. Wardline (with its matching Stage 0
+  fix) reads `code`, maps an unknown one to `rejected`, and keeps
+  `"<code>: <reason>"` as the failure detail. The frozen classic `POST /api/v1/scan-results`
   envelope is unchanged. No schema change.
 - **Scan ingest accepts defect findings only by default; the sweep never
   flips telemetry (Stage 0).** A finding whose `metadata.wardline.kind` is a
