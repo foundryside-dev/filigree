@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
+import os
 import stat
 from pathlib import Path
 from typing import Any
@@ -26,6 +28,7 @@ import filigree.dashboard as dash_module
 from filigree.core import DB_FILENAME, FiligreeAnchor, FiligreeDB, write_config
 from filigree.dashboard import create_app
 from filigree.federation_token import (
+    FEDERATION_TOKEN_ENV_VARS,
     FEDERATION_TOKEN_FILENAME,
     WEFT_FEDERATION_ENV_VAR,
     ReconcileStatus,
@@ -109,6 +112,16 @@ class TestBootReconciliation:
         # the old stale value is (correctly) rejected.
         assert captured["file_token_status"] == 200
         assert captured["stale_token_status"] == 401
+        # (d) the reconcile record reaches the daemon's real log file — not just a
+        # test capture handler. setup_logging must run before the token step, or
+        # the INFO record is dropped on every real boot.
+        log_text = (store / "filigree.log").read_text()
+        records = [json.loads(line) for line in log_text.splitlines() if line.strip()]
+        reconciled = [r for r in records if r.get("msg") == "token_file_reconciled"]
+        assert len(reconciled) == 1, records
+        assert reconciled[0]["args"]["new_fingerprint"] == hashlib.sha256(ENV_TOKEN.encode()).hexdigest()[:8]
+        assert ENV_TOKEN not in log_text
+        assert STALE_TOKEN not in log_text
 
     def test_server_mode_boot_reconciles_config_dir_without_env_pin_promotion(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -119,10 +132,16 @@ class TestBootReconciliation:
         config_dir.mkdir()
         (config_dir / FEDERATION_TOKEN_FILENAME).write_text(STALE_TOKEN + "\n")
         monkeypatch.setenv(WEFT_FEDERATION_ENV_VAR, ENV_TOKEN)
+        env_before = dict(os.environ)
+        aliases_before = {name: os.environ.get(name) for name in FEDERATION_TOKEN_ENV_VARS}
 
         pinned = dash_module._mint_and_guard_federation_token(config_dir, allow_env_pin=False)
 
         assert pinned is False
+        # F1: the boot reconcile flows env -> file only; the process env (every
+        # federation alias included) is exactly as it was.
+        assert {name: os.environ.get(name) for name in FEDERATION_TOKEN_ENV_VARS} == aliases_before
+        assert dict(os.environ) == env_before
         assert read_token_file(config_dir) == ENV_TOKEN
         assert _token_mode(config_dir) == 0o600
 

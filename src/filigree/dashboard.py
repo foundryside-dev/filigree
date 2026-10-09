@@ -1286,6 +1286,26 @@ def main(
             print("Run `filigree doctor` for diagnosis.", file=sys.stderr)
             sys.exit(1)
 
+    # JSONL call log: one ``event="call"`` record per HTTP request lands in the
+    # served project's filigree.log (server mode: the daemon's own config dir).
+    # Real serve only — create_app (called directly by tests) never attaches a
+    # file handler. Set up BEFORE the token mint/reconcile below so the boot-time
+    # ``token_file_reconciled`` (INFO) and ``federation_token_persist_failed``
+    # records land in this log: the ``filigree`` logger has no handler and an
+    # effective WARNING level until setup_logging runs (HTTP F14 review).
+    try:
+        from filigree.logging import setup_logging
+
+        if server_mode:
+            from filigree.server import SERVER_CONFIG_DIR
+
+            SERVER_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            setup_logging(SERVER_CONFIG_DIR)
+        elif _db is not None:
+            setup_logging(_db.meta_dir)
+    except OSError:
+        logger.warning("Could not open the dashboard call log; HTTP calls will not be logged", exc_info=True)
+
     # First-serve federation-token mint (tier 2). Auto-provision the daemon's own
     # token file so single-host federation auth works with zero operator toil; the
     # env var stays the cross-host override. Mints into the daemon's own subtree —
@@ -1301,23 +1321,6 @@ def main(
         _mint_and_guard_federation_token(SERVER_CONFIG_DIR, allow_env_pin=False)
     elif _db is not None:
         _pinned_token_env = _mint_and_guard_federation_token(_db.meta_dir, allow_env_pin=True)
-
-    # JSONL call log: one ``event="call"`` record per HTTP request lands in the
-    # served project's filigree.log (server mode: the daemon's own config dir).
-    # Real serve only — create_app (called directly by tests) never attaches a
-    # file handler.
-    try:
-        from filigree.logging import setup_logging
-
-        if server_mode:
-            from filigree.server import SERVER_CONFIG_DIR
-
-            SERVER_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-            setup_logging(SERVER_CONFIG_DIR)
-        elif _db is not None:
-            setup_logging(_db.meta_dir)
-    except OSError:
-        logger.warning("Could not open the dashboard call log; HTTP calls will not be logged", exc_info=True)
 
     app = create_app(server_mode=server_mode)
 

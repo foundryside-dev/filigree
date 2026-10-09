@@ -2254,9 +2254,75 @@ class TestDoctorFederationTokenFileMismatch:
     it means the daemon (started with that env) 401s every sibling. Doctor
     reports the mismatch and ``--fix`` realigns the file to the env token."""
 
+    @pytest.fixture(autouse=True)
+    def _no_live_daemon(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Hermetic: never probe a real daemon (the dev box runs one on :8749).
+        Tests exercising the live-daemon guard override this stub."""
+        monkeypatch.setattr("filigree.install_support.doctor._live_daemon_health", lambda _root, _mode: None)
+
     def _clear_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         for v in ("WEFT_FEDERATION_TOKEN", "FILIGREE_FEDERATION_API_TOKEN", "FILIGREE_API_TOKEN"):
             monkeypatch.delenv(v, raising=False)
+
+    def test_live_daemon_matching_file_downgrades_to_report_only(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A running daemon reports the published file matches what it enforces:
+        the shell env is the stale side. Doctor reports that and --fix must NOT
+        rewrite the file to the shell's value (that would 401 every sibling)."""
+        from filigree.cli_commands.admin import _apply_doctor_fixes
+
+        self._clear_env(monkeypatch)
+        project = _make_project(tmp_path)
+        token_file = project / FILIGREE_DIR_NAME / "federation_token"
+        token_file.write_text("daemon-enforced-tok\n")
+        monkeypatch.setenv("WEFT_FEDERATION_TOKEN", "stale-shell-tok")
+        probed: list[tuple[Path, str]] = []
+
+        def fake_probe(root: Path, mode: str) -> dict[str, object]:
+            probed.append((root, mode))
+            return {"status": "ok", "mode": "ephemeral", "auth": {"file_matches_active": True}}
+
+        monkeypatch.setattr("filigree.install_support.doctor._live_daemon_health", fake_probe)
+
+        results = run_doctor(project)
+        assert probed, "the guard must consult the live-daemon probe"
+        assert not any(r.code == "federation_token_file_mismatch" for r in results)
+        shell = [r for r in results if r.code == "federation_token_shell_env_mismatch"]
+        assert len(shell) == 1
+        assert shell[0].passed is False
+        assert "running daemon" in shell[0].message
+        assert "daemon-enforced-tok" not in shell[0].message
+        assert "stale-shell-tok" not in shell[0].message
+
+        monkeypatch.chdir(project)
+        _fixed, fixed_ids, _names = _apply_doctor_fixes(results, emit=None)
+        assert "federation.token_file" not in fixed_ids
+        assert token_file.read_text().strip() == "daemon-enforced-tok"  # file left alone
+
+    @pytest.mark.parametrize(
+        "health",
+        [
+            None,  # no daemon answers
+            {"status": "ok", "mode": "ephemeral", "auth": {"file_matches_active": False}},  # daemon enforces env
+            {"status": "ok", "mode": "ephemeral", "auth": {"federation": {"enabled": True}}},  # pre-field daemon
+        ],
+    )
+    def test_no_daemon_vouching_for_file_keeps_fix(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, health: dict[str, object] | None
+    ) -> None:
+        from filigree.cli_commands.admin import _apply_doctor_fixes
+
+        self._clear_env(monkeypatch)
+        project = _make_project(tmp_path)
+        token_file = project / FILIGREE_DIR_NAME / "federation_token"
+        token_file.write_text("stale-file-tok\n")
+        monkeypatch.setenv("WEFT_FEDERATION_TOKEN", "env-active-tok")
+        monkeypatch.setattr("filigree.install_support.doctor._live_daemon_health", lambda _root, _mode: health)
+
+        results = run_doctor(project)
+        assert any(r.code == "federation_token_file_mismatch" for r in results)
+        monkeypatch.chdir(project)
+        _apply_doctor_fixes(results, emit=None)
+        assert token_file.read_text().strip() == "env-active-tok"
 
     def test_doctor_flags_mismatch_and_fix_reconciles(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         from filigree.cli_commands.admin import _apply_doctor_fixes

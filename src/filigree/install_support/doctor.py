@@ -759,6 +759,41 @@ def _doctor_federation_token_checks(project_root: Path, mode: str) -> list[Check
     return results
 
 
+def _live_daemon_health(project_root: Path, mode: str) -> dict[str, Any] | None:
+    """Best-effort ``/api/health`` payload of a live daemon serving this store.
+
+    Server mode: the PID-verified shared daemon (:func:`filigree.server.daemon_status`)
+    on its configured port. Otherwise: the ephemeral dashboard on the port recorded
+    in the store's ``ephemeral.port`` (the same file the "Ephemeral port" check
+    reads). The listener must identify itself with the expected ``mode`` — any
+    error, timeout, or unidentified listener returns ``None`` (no daemon known).
+    """
+    import urllib.request
+
+    try:
+        if mode == "server":
+            from filigree.server import daemon_status
+
+            status = daemon_status()
+            port = status.port if status.running else None
+            expected_modes: tuple[str, ...] = ("server",)
+        else:
+            from filigree.core import LEGACY_EPHEMERAL_MODE
+            from filigree.ephemeral import read_port_file
+
+            port = read_port_file(resolve_store_dir(project_root) / "ephemeral.port")
+            expected_modes = (EPHEMERAL_MODE, LEGACY_EPHEMERAL_MODE)
+        if not port:
+            return None
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=0.5) as resp:
+            payload = json.loads(resp.read(65536))
+    except Exception:
+        return None
+    if isinstance(payload, dict) and payload.get("mode") in expected_modes:
+        return payload
+    return None
+
+
 def _doctor_federation_token_file_check(project_root: Path, mode: str) -> list[CheckResult]:
     """Published token file vs the active env token (HTTP F14 / M-6).
 
@@ -792,6 +827,32 @@ def _doctor_federation_token_file_check(project_root: Path, mode: str) -> list[C
     file_token = read_token_file(store_dir)
     if not file_token or file_token == env_token:
         return []
+
+    # Guard the --fix against reconciling to the wrong env: the env read above is
+    # THIS shell's. If a live daemon for this store says the published file
+    # already matches the token it enforces, the file is right and the shell is
+    # the odd one out — rewriting the file to the shell's value would 401 every
+    # sibling. Report only (a code --fix does not route). No daemon answering, or
+    # one reporting a mismatch / predating the field, keeps the fixable result.
+    health = _live_daemon_health(project_root, mode)
+    daemon_auth = health.get("auth") if health is not None else None
+    if isinstance(daemon_auth, dict) and daemon_auth.get("file_matches_active") is True:
+        return [
+            CheckResult(
+                "Federation token file",
+                False,
+                f"this shell's {env_name} (fingerprint {token_fingerprint(env_token)}) differs from "
+                f"{store_dir}/federation_token (fingerprint {token_fingerprint(file_token)}), but the running daemon "
+                "reports the published file matches the token it enforces — the shell env is stale, not the file; "
+                "not rewriting it",
+                fix_hint=(
+                    f"Unset or correct {env_name} in this shell (clients using it will 401); "
+                    "the published token file is already what the daemon accepts."
+                ),
+                code="federation_token_shell_env_mismatch",
+            )
+        ]
+
     return [
         CheckResult(
             "Federation token file",
