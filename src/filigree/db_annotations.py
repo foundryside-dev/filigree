@@ -186,9 +186,28 @@ class AnnotationsMixin(DBMixinProtocol):
         return snippet, before, after
 
     def _run_git(self, args: list[str], *, cwd: Path) -> tuple[bool, str]:
+        # Provenance is collected from projects that may not be trusted.  Do not
+        # let repository-local Git configuration turn these read-only queries
+        # into command execution (for example via core.fsmonitor or an external
+        # diff driver).
+        safe_args = list(args)
+        if safe_args and safe_args[0] == "diff":
+            safe_args[1:1] = ["--no-ext-diff", "--no-textconv"]
         try:
             proc = subprocess.run(
-                ["git", "-C", str(cwd), *args],
+                [
+                    "git",
+                    "--no-optional-locks",
+                    "-c",
+                    "core.fsmonitor=false",
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "-c",
+                    "diff.external=",
+                    "-C",
+                    str(cwd),
+                    *safe_args,
+                ],
                 check=False,
                 capture_output=True,
                 text=True,
