@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import functools
 import json
 import logging
 import sqlite3
@@ -1068,6 +1069,14 @@ async def _dispatch_call_tool(name: str, arguments: dict[str, Any]) -> list[Text
         from filigree.mcp_tools.common import _text as _common_text
 
         return _common_text(schema_validation_error)
+
+    # Pre-lock hooks (final review I4): slow work that touches no DB
+    # transaction -- today only issue_close's git reachability check -- runs
+    # here, before the per-project lock, so it cannot stall sibling calls. The
+    # handler receives the result as ``_prepared``.
+    pre_lock = _issues_mod.PRE_LOCK_HOOKS.get(name)
+    if pre_lock is not None:
+        handler = functools.partial(handler, _prepared=await pre_lock(arguments))
 
     # Serialise tool execution per-DB. The MCP SDK dispatches tool calls
     # concurrently; the shared ``sqlite3.Connection`` on ``FiligreeDB`` has

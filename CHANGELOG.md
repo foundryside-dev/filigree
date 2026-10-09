@@ -116,7 +116,8 @@ policy (ADR-030) records this as its one pre-4.0 exception.
   one fresh fetch, so a commit pushed moments ago is not blamed. A close that
   will 404 or is already closed skips git.
   On the MCP and HTTP surfaces this runs on a worker thread, never on the
-  event loop. A sha that is not an ancestor adds
+  event loop. On MCP it also runs before the per-project tool lock is taken,
+  so a slow fetch never holds up other MCP calls on the same project. A sha that is not an ancestor adds
   `commit_not_reachable_from_integration_ref: <sha> not in origin/<ref>` to the
   response's `warnings[]`. That includes a squash-merged branch sha, and, in a
   full clone, a sha git has no object for (for example, a commit that exists

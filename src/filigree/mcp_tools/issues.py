@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
+    from filigree.commit_reachability import ReachabilityCheck
     from filigree.types.core import StatusCategory
 
 from mcp.types import TextContent, Tool
@@ -1278,7 +1280,56 @@ async def _handle_update_issue(arguments: dict[str, Any]) -> list[TextContent]:
         return _text(ErrorResponse(error=msg, code=ErrorCode.VALIDATION))
 
 
-async def _handle_close_issue(arguments: dict[str, Any]) -> list[TextContent]:
+@dataclass(frozen=True)
+class PreparedClose:
+    """The commit-reachability verdict an ``issue_close`` call computed before the tool lock.
+
+    ``check`` is ``None`` when the close was not going to reach the check (a
+    404 or an already-closed issue at pre-lock time); the handler then re-asks
+    ``close_commit_check_applies`` under the lock and runs git inline only in
+    the rare case that answer changed meanwhile.
+    """
+
+    issue_id: str
+    commit: str
+    check: ReachabilityCheck | None
+
+
+async def _prepare_close_issue(arguments: dict[str, Any]) -> PreparedClose | None:
+    """Pre-lock hook for ``issue_close`` (final review I4).
+
+    ``call_tool`` runs this BEFORE taking the per-project tool lock, so the git
+    fetch + merge-base (up to ~10 s each) never holds up the other MCP calls on
+    the project. ``check_close_commit`` touches no DB connection; the only DB
+    access here is ``close_commit_check_applies`` -- one read-only statement on
+    the event-loop thread, which cannot interleave with another coroutine's
+    statement. Never raises: on any surprise it returns ``None`` and the
+    handler computes the check itself, as before.
+    """
+    issue_id = arguments.get("issue_id")
+    commit = arguments.get("commit")
+    if not isinstance(issue_id, str) or not isinstance(commit, str):
+        return None
+    try:
+        tracker = get_db()
+        if not tracker.close_commit_check_applies(issue_id):
+            return PreparedClose(issue_id=issue_id, commit=commit, check=None)
+        check = await asyncio.to_thread(tracker.check_close_commit, commit)
+    except Exception:
+        logger.debug("issue_close pre-lock commit check failed; the handler will compute it", exc_info=True)
+        return None
+    return PreparedClose(issue_id=issue_id, commit=commit, check=check)
+
+
+#: Hooks ``call_tool`` awaits before taking the per-project tool lock, keyed by
+#: canonical handler name. The result is passed to the handler as ``_prepared``.
+#: Only work that touches no DB transaction belongs here.
+PRE_LOCK_HOOKS: dict[str, Callable[[dict[str, Any]], Awaitable[Any]]] = {
+    "close_issue": _prepare_close_issue,
+}
+
+
+async def _handle_close_issue(arguments: dict[str, Any], *, _prepared: PreparedClose | None = None) -> list[TextContent]:
     args = _parse_args(arguments, CloseIssueArgs)
     actor, actor_err = _validate_actor(args.get("actor", "mcp"))
     if actor_err:
@@ -1296,10 +1347,16 @@ async def _handle_close_issue(arguments: dict[str, Any]) -> list[TextContent]:
     # Task 0.6: the commit reachability check runs git (fetch + merge-base, up
     # to ~10 s each), so it runs off the event loop -- and before the close's
     # DB work, so nothing below awaits between reading and writing. It touches
-    # no DB connection.
+    # no DB connection. Final review I4: ``call_tool`` normally computed it
+    # before taking the per-project tool lock (``_prepare_close_issue``); the
+    # inline path covers direct handler calls and a pre-lock "not applicable"
+    # answer that changed since.
     # Skipped when the close will 404 or refuse as already closed.
     commit_check = None
-    if commit is not None and tracker.close_commit_check_applies(args["issue_id"]):
+    prepared = _prepared if _prepared is not None and (_prepared.issue_id, _prepared.commit) == (args["issue_id"], commit) else None
+    if prepared is not None and prepared.check is not None:
+        commit_check = prepared.check
+    elif commit is not None and tracker.close_commit_check_applies(args["issue_id"]):
         commit_check = await asyncio.to_thread(tracker.check_close_commit, commit)
     try:
         gate = governance.evaluate_closure_gate(tracker, args["issue_id"])
