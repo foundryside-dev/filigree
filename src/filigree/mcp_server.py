@@ -730,7 +730,7 @@ _WORKFLOW_TEXT_STATIC = """\
 # Filigree Workflow
 
 You are working in a project that uses **filigree** for issue tracking.
-Filigree data lives in `.filigree/` and is accessed via these MCP tools.
+Filigree data lives in the project's store (`.weft/filigree/` by default) and is accessed via these MCP tools.
 
 ## Quick start
 1. Read `filigree://context` resource for current project state (vitals, ready work, blockers)
@@ -756,7 +756,7 @@ Filigree data lives in `.filigree/` and is accessed via these MCP tools.
 - **stats_get / summary_get** — project analytics
 - **metrics_get** — flow metrics (cycle time, lead time, throughput)
 - **dependency_critical_path** — longest dependency chain among open issues
-- **admin_reload_templates** — refresh templates after editing .filigree/templates/
+- **admin_reload_templates** — refresh templates after editing the store's templates/
 
 ## Conventions
 - Issue IDs: `{prefix}-{10hex}` (e.g., `myproj-a3f9b2e1c0`)

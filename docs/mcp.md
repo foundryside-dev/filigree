@@ -922,9 +922,10 @@ is required (or accepted).
 
 ### Federation Consumer Bindings
 
-The write-capable half of the warpline↔filigree seam (Seam 2A of the
-2026-06-13 warpline interface lock). warpline produces a reverify worklist and
-never auto-files; Filigree consumes it on explicit action.
+The write-capable half of the Warpline↔Filigree seam. Warpline was archived on
+2026-10-01; this consumer stays in 3.x for any worklist already produced and is
+removed in 4.0. The producer never auto-filed; Filigree consumes a worklist only
+on explicit action.
 
 | Tool | Description |
 |------|-------------|
@@ -933,10 +934,10 @@ never auto-files; Filigree consumes it on explicit action.
 #### `warpline_worklist_ingest`
 
 Each filed item carries the `warpline` + `federation` producer labels and an
-entity association on the item's SEI — the same surface warpline reads back via
-`entity_association_list_by_entity`, so a filed item shows up as tracked on the
-next worklist (the loop closes). Previews by default; `apply=true` performs the
-writes.
+entity association on the item's SEI — the surface the (archived) Warpline
+producer read back via `entity_association_list_by_entity`, so a filed item
+showed up as tracked on its next worklist. Previews by default; `apply=true`
+performs the writes.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -1030,7 +1031,7 @@ instead of acknowledging an unrelated issue.
 
 #### `scanner_list`
 
-No parameters. Returns scanners registered in `.filigree/scanners/*.toml` in
+No parameters. Returns scanners registered in `.weft/filigree/scanners/*.toml` in
 the unified list envelope:
 `{items: [{name, description, file_types, accepts_prompt, prompt_pack_aware, prompt_packs_endpoint, applicable_prompts, bundled_name, bundled_match, managed, sandbox_class, sandbox_summary, ...}], has_more: bool}`.
 If the list is empty, call `scanner_available_list` to see bundled scanners
@@ -1049,7 +1050,7 @@ project, including `command_available`, `command_path`, `enabled`,
 | `scanner` | string | yes | Bundled scanner name, e.g. `codex` or `claude` |
 | `force` | boolean | no | Replace an existing custom or stale bundled TOML |
 
-Writes the managed `.filigree/scanners/<scanner>.toml` registration for a
+Writes the managed `.weft/filigree/scanners/<scanner>.toml` registration for a
 bundled scanner. Refuses to overwrite custom TOML unless `force=true`. If the
 packaged runner command is not on `PATH`, the response includes
 `command_available=false` and a warning with the `uv tool install --upgrade
@@ -1162,7 +1163,7 @@ create a linked triage observation; full responses then include
 
 **Rate limiting:** Repeated triggers for the same scanner+file are rejected within a 30s cooldown window.
 
-**Important:** Results are POSTed to the dashboard API at `/api/scan-results`, the living alias for the recommended Weft generation. Without an explicit `api_url`, scanners use the active local dashboard: ephemeral mode reads `.filigree/ephemeral.port`, server mode reads the configured daemon port, and the legacy `http://localhost:8377` default is only used when no active ephemeral port has been recorded. Ensure the target is reachable before triggering scans — if unreachable, results are silently lost.
+**Important:** Results are POSTed to the dashboard API at `/api/scan-results`, the living alias for the recommended Weft generation. Without an explicit `api_url`, scanners use the active local dashboard: ephemeral mode reads `.weft/filigree/ephemeral.port`, server mode reads the configured daemon port, and the legacy `http://localhost:8377` default is only used when no active ephemeral port has been recorded. Ensure the target is reachable before triggering scans — if unreachable, results are silently lost.
 
 External scanner producers should include a globally unique, non-empty
 `scan_run_id` in scan-results POSTs when they want `GET /api/scan-runs`
@@ -1175,7 +1176,7 @@ posted finding's `fingerprint` field before POSTing. Filigree preserves that
 `finding.fingerprint` through readback, promote-by-fingerprint, dedup, stale
 cleanup, and reopen-on-regress lifecycle transitions.
 
-**Scanner registration:** Use `scanner_available_list`, `scanner_enable`, and `scanner_disable` from MCP, or `filigree scanner available`, `filigree scanner enable <name>`, and `filigree scanner disable <name>` from the CLI. Bundled scanners call installed `filigree-scanner-*` entrypoints, so projects do not need copied runner scripts. Custom scanners can still be added as TOML files under `.filigree/scanners/`. Custom scanners that declare `{prompt}` in their args template are expected to honor that prompt value themselves.
+**Scanner registration:** Use `scanner_available_list`, `scanner_enable`, and `scanner_disable` from MCP, or `filigree scanner available`, `filigree scanner enable <name>`, and `filigree scanner disable <name>` from the CLI. Bundled scanners call installed `filigree-scanner-*` entrypoints, so projects do not need copied runner scripts. Custom scanners can still be added as TOML files under `.weft/filigree/scanners/`. Custom scanners that declare `{prompt}` in their args template are expected to honor that prompt value themselves.
 
 **Prompt packs:** Use `prompt_pack_list` or `filigree scanner prompts` to list bundled review lenses. Agents can pass `prompt` to `scan_preview`, `scan_trigger`, or `scan_trigger_batch` to focus review without embedding long scanner instructions in their own prompt. Bundled packs include `security`, `pytorch`, `quality-engineering`, `solution-architecture`, `systems-thinking`, `system-interactions`, `python-engineering`, `css`, `javascript`, `typescript`, `react`, `rust`, `go`, `terraform`, `sql`, `comprehensive`, and `major-refactor`. Pack records include `language`, `expected_relative_cost`, `instructions`, and `prompt_pack_scope`; scanner records include `applicable_prompts` so agents do not need to infer language fit from names. The prompt pack only nudges model focus; file access is governed by the scanner CLI sandbox.
 

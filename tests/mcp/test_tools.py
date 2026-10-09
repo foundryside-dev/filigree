@@ -3082,6 +3082,17 @@ class TestInstructionsUpdate:
         assert "filigree-workflow" in FILIGREE_INSTRUCTIONS
         assert "--help" in FILIGREE_INSTRUCTIONS
 
+    def test_instructions_say_how_to_name_yourself(self) -> None:
+        """Task 0.9 (LX-11): the block states the real identity knobs — the
+        CLI's ``--actor``, MCP ``actor=`` and ``FILIGREE_ACTOR`` — and never
+        the ``--agent-id`` flag ``filigree-mcp`` does not accept."""
+        from filigree.install import FILIGREE_INSTRUCTIONS
+
+        assert "--actor <name>" in FILIGREE_INSTRUCTIONS
+        assert "actor=<name>" in FILIGREE_INSTRUCTIONS
+        assert "FILIGREE_ACTOR" in FILIGREE_INSTRUCTIONS
+        assert "--agent-id" not in FILIGREE_INSTRUCTIONS
+
     def test_instructions_stay_within_c18_budget(self) -> None:
         """C-20 budget: <= 800 chars for the injected template (weft-6a1fdb0192).
 

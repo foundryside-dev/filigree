@@ -7,7 +7,8 @@ sheet collects the parts an agent reaches for most, plus the project enums.
 
 Project data lives in the machine-owned store dir, resolved in this order: a
 `weft.toml` `[filigree].store_dir` override (project-relative only), then
-`.weft/filigree/`, then the legacy `.filigree/`.
+`.weft/filigree/`, then a pre-3.0 legacy store dir (`filigree doctor --verbose`
+names the one in use).
 
 ## Priority Semantics
 

@@ -13,7 +13,7 @@ from pathlib import Path
 import click
 
 from filigree.cli_commands.files import finding_group
-from filigree.cli_common import _emit_registry_startup_failure, add_hidden_flat_alias, get_db, refresh_summary
+from filigree.cli_common import ActorCommand, _emit_registry_startup_failure, add_hidden_flat_alias, explicit_actor, get_db, refresh_summary
 from filigree.commit_reachability import is_safe_ref
 from filigree.core import (
     CONF_FILENAME,
@@ -371,6 +371,28 @@ def init(prefix: str | None, name: str | None, mode: str | None, population: str
     click.echo("\nNext: filigree install")
 
 
+def _install_hook_actor(ctx: click.Context) -> str | None:
+    """Actor for the SessionStart hook: an explicit ``--actor``, else ``FILIGREE_ACTOR``, else None.
+
+    None leaves the hook installer to keep whatever actor an earlier install
+    recorded (or write the plain command when there is none).
+    """
+    actor = explicit_actor(ctx)
+    if actor is not None:
+        return actor
+    from filigree.hooks import ACTOR_ENV_VAR
+    from filigree.validation import sanitize_actor
+
+    env_actor = os.environ.get(ACTOR_ENV_VAR, "")
+    if not env_actor.strip():
+        return None
+    cleaned, err = sanitize_actor(env_actor)
+    if err:
+        click.echo(f"Warning: ignoring {ACTOR_ENV_VAR} for the session hook: {err}", err=True)
+        return None
+    return cleaned
+
+
 def _run_install_step(name: str, installer: Callable[[], tuple[bool, str]]) -> tuple[str, bool, str]:
     try:
         ok, msg = installer()
@@ -380,7 +402,7 @@ def _run_install_step(name: str, installer: Callable[[], tuple[bool, str]]) -> t
     return name, ok, msg
 
 
-@click.command()
+@click.command(cls=ActorCommand)
 @click.option("--claude-code", is_flag=True, help="Install MCP for Claude Code only")
 @click.option("--codex", is_flag=True, help="Install MCP for Codex only")
 @click.option(
@@ -399,7 +421,9 @@ def _run_install_step(name: str, installer: Callable[[], tuple[bool, str]]) -> t
     default=None,
     help="Installation mode (default: preserve existing or ephemeral; ethereal is the pre-3.3.0 alias)",
 )
+@click.pass_context
 def install(
+    ctx: click.Context,
     claude_code: bool,
     codex: bool,
     claude_md: bool,
@@ -414,6 +438,10 @@ def install(
 
     With no flags, installs everything: MCP servers, instructions, gitignore, hooks, skills.
     With specific flags, installs only the selected components.
+
+    ``--actor`` (either position; else ``FILIGREE_ACTOR``) is written into the
+    SessionStart hook as ``filigree --actor <id> session-context`` so the
+    session banner scopes your own claims.
     """
     from filigree.install import (
         ensure_filigree_dir_gitignore,
@@ -518,7 +546,7 @@ def install(
         (
             install_all or hooks_only,
             "Claude Code hooks",
-            lambda: install_claude_code_hooks(project_root),
+            lambda: install_claude_code_hooks(project_root, actor=_install_hook_actor(ctx)),
         ),
         (
             install_all or skills_only,

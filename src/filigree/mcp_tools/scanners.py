@@ -388,7 +388,7 @@ def register(
         Tool(
             name="list_scanners",
             description=(
-                "List registered scanners from .filigree/scanners/*.toml. Returns available scanner names, "
+                "List registered scanners from the store's scanners/*.toml (.weft/filigree/scanners/ by default). Returns available scanner names, "
                 "descriptions, supported file types, prompt support, and risk metadata. If this returns an empty "
                 "items list, call scanner_available_list to see bundled scanners that can be enabled."
             ),

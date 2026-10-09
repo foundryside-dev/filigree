@@ -218,7 +218,7 @@ class TestBuildContext:
         db.promote_finding_to_issue(bridged["id"], actor="t")
 
         result = _build_context(db)
-        assert "ANALYZER SIGNAL: 2 defect-signal finding(s) open (+1 telemetry rows, not work — see Task 0.5)" in result
+        assert "ANALYZER SIGNAL: 2 defect-signal finding(s) open (+1 telemetry rows, not work — see `filigree finding export`)" in result
         # N-4 (weft-993c1077e1): runnable hints are CLI commands; MCP verbs named alongside.
         assert "`filigree finding list --kind defect --status open`" in result
         assert "finding_list kind=defect status=open suppression=active limit=25" in result

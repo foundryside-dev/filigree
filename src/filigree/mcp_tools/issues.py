@@ -580,7 +580,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                     "commit": {
                         "type": "string",
                         "description": (
-                            "Opaque branch@sha commit anchor (warpline seam). Stored verbatim as claim_commit. Omit to leave it null."
+                            "Optional opaque branch@sha commit anchor for the claim. Stored verbatim as claim_commit. Omit to leave it null."
                         ),
                     },
                 },
@@ -843,7 +843,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                     "commit": {
                         "type": "string",
                         "description": (
-                            "Opaque branch@sha commit anchor (warpline seam). Stored verbatim as claim_commit. Omit to leave it null."
+                            "Optional opaque branch@sha commit anchor for the claim. Stored verbatim as claim_commit. Omit to leave it null."
                         ),
                     },
                 },

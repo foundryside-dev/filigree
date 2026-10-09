@@ -190,7 +190,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
         ),
         Tool(
             name="reload_templates",
-            description="Reload workflow templates from disk. Use after editing .filigree/templates/ or .filigree/packs/ files.",
+            description="Reload workflow templates from disk. Use after editing the store's templates/ or packs/ files (.weft/filigree/ by default).",
             inputSchema={"type": "object", "properties": {}},
         ),
     ]

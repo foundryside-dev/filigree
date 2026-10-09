@@ -233,7 +233,7 @@ def _build_context(db: FiligreeDB, filigree_dir: Path | None = None, actor: str 
         telemetry = fstats["actionable_other"]
         if defect > 0 or telemetry > 0:
             lines.append("")
-            telemetry_note = f" (+{telemetry} telemetry rows, not work — see Task 0.5)" if telemetry > 0 else ""
+            telemetry_note = f" (+{telemetry} telemetry rows, not work — see `filigree finding export`)" if telemetry > 0 else ""
             lines.append(
                 f"ANALYZER SIGNAL: {defect} defect-signal finding(s) open{telemetry_note} "
                 f"— review with `filigree finding list --kind defect --status open` "

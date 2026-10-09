@@ -1,6 +1,6 @@
 # Team Coordination
 
-Multi-agent swarm protocols for filigree 2.0. Load this reference when coordinating
+Multi-agent swarm protocols for filigree. Load this reference when coordinating
 work across multiple agents.
 
 ## Atomic Start
@@ -8,7 +8,7 @@ work across multiple agents.
 ### The Race Condition Problem
 
 When multiple agents call `filigree update <issue-id> --status=<wip>`
-simultaneously, both think they own the issue. Filigree 2.0 solves this with
+simultaneously, both think they own the issue. Filigree solves this with
 `start-work`, which atomically claims the issue *and* transitions it to its
 type-specific working status (tasks → `in_progress`, features → `building`,
 bugs → `fixing`) in a single DB transaction with optimistic locking on the
@@ -25,7 +25,7 @@ filigree start-next-work --assignee <agent-name>
 ```
 
 If another agent already claimed the issue, the call fails with
-`code: CONFLICT` (CLI exit 4). No silent overwrite, no half-claimed state —
+`code: CONFLICT` (CLI exit 1). No silent overwrite, no half-claimed state —
 either both the claim and the transition land, or neither does.
 
 `start-next-work` accepts the work-scoping filters `claim-next` also
@@ -45,7 +45,7 @@ filigree claim <issue-id> --assignee <agent-name>
 filigree claim-next --assignee <agent-name>
 ```
 
-These are kept for niche use; `start-work` is the default in 2.0.
+These are kept for niche use; `start-work` is the default.
 
 ### Releasing Claims
 
@@ -194,9 +194,9 @@ filigree --actor <you> release-my-claims            # MCP: work_release_mine
 ### CONFLICT Responses
 
 A `start-work` (or `claim`) call that loses the race returns
-`{error: ..., code: "CONFLICT", details: {current_assignee: "..."}}` and
-exits with code 4. This is distinct from operational errors (exit 1) so
-automated callers can retry against a different issue without escalating.
+`{error: ..., code: "CONFLICT", details: {issue_id: "...", observed: "<holder>", expected: "<you>"}}`
+and exits 1, like every other error envelope. Branch on `code`, not the exit
+status: `CONFLICT` means retry against a different issue without escalating.
 
 ## Session Resumption
 

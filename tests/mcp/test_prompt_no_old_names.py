@@ -27,6 +27,7 @@ import filigree.mcp_server as mcp_server
 from filigree.core import FiligreeDB
 from filigree.mcp_tools.rename import RENAME_MAP
 from tests._seeds import seed_observations
+from tests.mcp._stale_prose import stale_claims
 
 # Whole-word alternation of every OLD tool name. Longest-first is cosmetic; the
 # \b anchors make the match unambiguous.
@@ -72,3 +73,21 @@ def test_guard_can_detect_an_old_name() -> None:
     sample_new = RENAME_MAP[sample_old]
     assert _OLD_NAME_RE.search(f"call {sample_old} to find work")
     assert not _OLD_NAME_RE.search(f"call {sample_new} to find work")
+
+
+def test_static_prompt_makes_no_stale_claim() -> None:
+    """Task 0.9 (LX-14): the prompt names no archived member as live, no
+    ``.filigree/`` store path, no ``--agent-id`` and no stale CONFLICT shape."""
+    hits = stale_claims(mcp_server._WORKFLOW_TEXT_STATIC)
+    assert not hits, f"_WORKFLOW_TEXT_STATIC makes stale claims: {hits}"
+
+
+def test_dynamic_prompt_makes_no_stale_claim(mcp_db: FiligreeDB) -> None:
+    """The rendered dynamic prompt (seeded so every dynamic branch renders)
+    makes no stale claim either."""
+    mcp_db.create_issue("Seed", type="bug", priority=2)
+    seed_observations(mcp_db, count=1)
+    text = mcp_server._build_workflow_text()
+    assert "## Registered Types" in text
+    hits = stale_claims(text)
+    assert not hits, f"_build_workflow_text() makes stale claims: {hits}"

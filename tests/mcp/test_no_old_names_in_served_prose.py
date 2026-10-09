@@ -35,6 +35,7 @@ from typing import Any
 
 from filigree.mcp_server import _served_tools
 from filigree.mcp_tools.rename import RENAME_MAP
+from tests.mcp._stale_prose import stale_claims
 
 # Whole-word alternation of every OLD tool name. Longest-first so the regex
 # engine prefers the longest match (cosmetic; \b anchors make it unambiguous).
@@ -80,6 +81,18 @@ def test_no_served_description_names_an_old_tool() -> None:
                 suggested = {old: RENAME_MAP[old] for old in hits}
                 offenders.append(f"{location}: old names {hits} -> use {suggested}")
     assert not offenders, "served prose references old tool names:\n" + "\n".join(offenders)
+
+
+def test_no_served_description_makes_a_stale_claim() -> None:
+    """Task 0.9 (LX-11, LX-14, LX-16): no served description (top-level or
+    parameter) names Legis/Warpline as live ("(warpline seam)" jargon on core
+    tools included), points at ``.filigree/``, claims ``--agent-id`` or
+    documents a stale CONFLICT shape / exit code."""
+    offenders: list[str] = []
+    for tool in _served_tools:
+        for location, text in _iter_descriptions(tool):
+            offenders.extend(f"{location}: {label}" for _line, label in stale_claims(text))
+    assert not offenders, "served prose makes stale claims:\n" + "\n".join(offenders)
 
 
 def test_guard_can_detect_an_old_name() -> None:

@@ -3,7 +3,7 @@
 Load this reference when parsing `--json` output or MCP responses, or when
 deciding how to react to a failure.
 
-## Response Envelopes (2.0)
+## Response Envelopes
 
 - **Batch ops** → `{succeeded: [...], failed: [{id, error, code}, ...], newly_unblocked?: [...]}`.
   `failed` is always present (empty list if none); `newly_unblocked` is
@@ -13,7 +13,7 @@ deciding how to react to a failure.
   `next_offset` only appears when there is a next page.
 - **Errors** → `{error: str, code: ErrorCode, details?: dict}`.
 
-The issue ID is always `issue_id` in 2.0 — in MCP inputs, response payloads,
+The issue ID is always `issue_id` — in MCP inputs, response payloads,
 and CLI JSON. Status is always `status`; "state" was retired as a
 user-facing word.
 
@@ -27,9 +27,10 @@ Switch on `code`, never on message text. The full enum:
 `LOOMWEAVE_OUT_OF_SYNC`, `BRIEFING_BLOCKED`, `STOP_FAILED`,
 `SCHEMA_MISMATCH`, `INTERNAL`.
 
-Branch on `code` for retry policy: `CONFLICT` → CLI exit 4, retryable
-(another agent owns the claim — retry against a different issue); everything
-at exit 1 needs operator intervention.
+Branch on `code`, never on the CLI exit status: every error envelope exits 1
+(click usage errors exit 2). `CONFLICT` is retryable (another agent owns the
+claim — retry against a different issue); most other codes need a changed
+request or operator intervention.
 
 ## Failure modes that deserve a specific response
 
@@ -64,6 +65,7 @@ at exit 1 needs operator intervention.
   Filigree/Loomweave pair. Every hint except `invalid_response` also offers
   `loomweave.allow_local_fallback=true` as an interim fallback to local file
   ids. Surface the hint; do not retry in a loop.
-- **`ForeignDatabaseError`** — filigree found a parent project's database but
-  no local `.filigree.conf`. Run `filigree init` in the current directory. Do
+- **`ForeignDatabaseError`** — filigree found a parent project's database
+  above this git repository, which has no store of its own. Run
+  `filigree init` in the current directory. Do
   **not** `cd` upward to a different project unless that was the actual intent.

@@ -148,7 +148,7 @@ def test_banner_defect_count_and_hint_excludes_telemetry(db: FiligreeDB) -> None
 
     line = next(line for line in context.splitlines() if line.startswith("ANALYZER SIGNAL"))
     assert line.startswith("ANALYZER SIGNAL: 2 defect-signal finding(s) open")
-    assert "(+3 telemetry rows, not work — see Task 0.5)" in line
+    assert "(+3 telemetry rows, not work — see `filigree finding export`)" in line
     assert "`filigree finding list --kind defect --status open`" in line
     assert "finding_list kind=defect status=open suppression=active limit=25" in line
     assert "actionable" not in context

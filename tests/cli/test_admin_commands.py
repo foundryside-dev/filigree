@@ -433,6 +433,55 @@ class TestJsonRetrofit:
 
 
 class TestInstallCli:
+    @staticmethod
+    def _session_cmds(project: Path) -> list[str]:
+        data = json.loads((project / ".claude" / "settings.json").read_text())
+        return [h["command"] for m in data["hooks"]["SessionStart"] for h in m["hooks"] if "session-context" in h["command"]]
+
+    def test_install_hooks_with_actor_option(self, cli_in_project: tuple[CliRunner, Path], monkeypatch: pytest.MonkeyPatch) -> None:
+        """Task 0.9: ``install --actor`` writes ``filigree --actor <id> session-context``."""
+        runner, project = cli_in_project
+        monkeypatch.delenv("FILIGREE_ACTOR", raising=False)
+        monkeypatch.setattr("filigree.install_support.hooks.find_filigree_command", lambda: ["filigree"])
+        result = runner.invoke(cli, ["install", "--hooks", "--actor", "alice"])
+        assert result.exit_code == 0, result.output
+        assert self._session_cmds(project) == ["filigree --actor alice session-context"]
+
+    def test_install_hooks_with_group_actor(self, cli_in_project: tuple[CliRunner, Path], monkeypatch: pytest.MonkeyPatch) -> None:
+        runner, project = cli_in_project
+        monkeypatch.delenv("FILIGREE_ACTOR", raising=False)
+        monkeypatch.setattr("filigree.install_support.hooks.find_filigree_command", lambda: ["filigree"])
+        result = runner.invoke(cli, ["--actor", "carol", "install", "--hooks"])
+        assert result.exit_code == 0, result.output
+        assert self._session_cmds(project) == ["filigree --actor carol session-context"]
+
+    def test_install_hooks_actor_from_env(self, cli_in_project: tuple[CliRunner, Path], monkeypatch: pytest.MonkeyPatch) -> None:
+        runner, project = cli_in_project
+        monkeypatch.setenv("FILIGREE_ACTOR", "dave")
+        monkeypatch.setattr("filigree.install_support.hooks.find_filigree_command", lambda: ["filigree"])
+        result = runner.invoke(cli, ["install", "--hooks"])
+        assert result.exit_code == 0, result.output
+        assert self._session_cmds(project) == ["filigree --actor dave session-context"]
+        # An explicit --actor beats the environment.
+        result = runner.invoke(cli, ["install", "--hooks", "--actor", "erin"])
+        assert result.exit_code == 0, result.output
+        assert self._session_cmds(project) == ["filigree --actor erin session-context"]
+
+    def test_install_hooks_without_actor_keeps_plain_command(
+        self, cli_in_project: tuple[CliRunner, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner, project = cli_in_project
+        monkeypatch.delenv("FILIGREE_ACTOR", raising=False)
+        monkeypatch.setattr("filigree.install_support.hooks.find_filigree_command", lambda: ["filigree"])
+        result = runner.invoke(cli, ["install", "--hooks"])
+        assert result.exit_code == 0, result.output
+        assert self._session_cmds(project) == ["filigree session-context"]
+
+    def test_install_rejects_an_invalid_actor(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        result = runner.invoke(cli, ["install", "--hooks", "--actor", "bad\nactor"])
+        assert result.exit_code != 0
+
     def test_install_all(self, cli_in_project: tuple[CliRunner, Path], monkeypatch: pytest.MonkeyPatch) -> None:
         runner, project = cli_in_project
         codex_home = project / ".test-home"

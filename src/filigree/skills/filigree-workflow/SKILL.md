@@ -41,8 +41,8 @@ conversation.
 (MCP) claim the issue *and* transition it into its working status in one DB
 transaction, with optimistic locking on the assignee. Never chain a claim with
 a separate status update — that two-step form races other agents. If someone
-else already owns it, the call fails with `code: CONFLICT` (CLI exit 4); retry
-against different work.
+else already owns it, the call fails with `code: CONFLICT` (CLI exit 1, like
+every error — branch on `code`); retry against different work.
 
 > **Ready ≠ startable.** The working status is type-specific (tasks →
 > `in_progress`, features → `building`). Bugs start at `triage`, which has no

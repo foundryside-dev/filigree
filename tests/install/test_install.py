@@ -1852,6 +1852,57 @@ class TestInstallClaudeCodeHooks:
         assert parsed[1:] == ["-m", "filigree", "session-context"]
 
 
+class TestInstallHooksActor:
+    """Task 0.9: the SessionStart hook carries the installing agent's actor so
+    the session-context banner can scope "YOUR CLAIMS" instead of printing
+    "actor unknown — pass --actor"."""
+
+    MOCK_TOKENS = ["/mock/venv/bin/filigree"]  # noqa: RUF012
+
+    def _session_cmds(self, root: Path) -> list[str]:
+        data = json.loads((root / ".claude" / "settings.json").read_text())
+        return [h["command"] for m in data["hooks"]["SessionStart"] for h in m["hooks"] if "session-context" in h["command"]]
+
+    def _install(self, root: Path, actor: str | None = None) -> None:
+        with patch("filigree.install_support.hooks.find_filigree_command", return_value=self.MOCK_TOKENS):
+            ok, msg = install_claude_code_hooks(root, actor=actor)
+        assert ok, msg
+
+    def test_actor_is_written_into_the_session_context_command(self, tmp_path: Path) -> None:
+        self._install(tmp_path, actor="alice")
+        assert self._session_cmds(tmp_path) == ["/mock/venv/bin/filigree --actor alice session-context"]
+
+    def test_reinstall_with_a_different_actor_replaces_not_duplicates(self, tmp_path: Path) -> None:
+        self._install(tmp_path, actor="alice")
+        self._install(tmp_path, actor="bob")
+        assert self._session_cmds(tmp_path) == ["/mock/venv/bin/filigree --actor bob session-context"]
+
+    def test_no_actor_keeps_todays_command(self, tmp_path: Path) -> None:
+        self._install(tmp_path)
+        assert self._session_cmds(tmp_path) == ["/mock/venv/bin/filigree session-context"]
+
+    def test_install_without_actor_preserves_an_existing_hook_actor(self, tmp_path: Path) -> None:
+        """``doctor --fix`` re-runs the hook installer with no actor; it must
+        not silently strip the identity a previous install recorded."""
+        self._install(tmp_path, actor="alice")
+        self._install(tmp_path)
+        assert self._session_cmds(tmp_path) == ["/mock/venv/bin/filigree --actor alice session-context"]
+
+    def test_actor_with_spaces_is_shell_quoted(self, tmp_path: Path) -> None:
+        self._install(tmp_path, actor="agent one")
+        assert self._session_cmds(tmp_path) == ["/mock/venv/bin/filigree --actor 'agent one' session-context"]
+        self._install(tmp_path, actor="bob")
+        assert self._session_cmds(tmp_path) == ["/mock/venv/bin/filigree --actor bob session-context"]
+
+    def test_doctor_recognises_a_hook_with_an_actor(self, tmp_path: Path) -> None:
+        from filigree.install_support.hooks import SESSION_CONTEXT_COMMAND, _extract_hook_binary, _has_hook_command
+
+        self._install(tmp_path, actor="alice")
+        settings = json.loads((tmp_path / ".claude" / "settings.json").read_text())
+        assert _has_hook_command(settings, SESSION_CONTEXT_COMMAND)
+        assert _extract_hook_binary(settings, SESSION_CONTEXT_COMMAND) == "/mock/venv/bin/filigree"
+
+
 class TestInstallHooksMatcherIsolation:
     """Bug filigree-9fb21f2b4b: filigree SessionStart hooks must not be
     appended to a user block whose ``matcher`` scopes it to a subset of
@@ -2229,6 +2280,25 @@ class TestHookCmdMatchesStrict:
         from filigree.install_support.hooks import _hook_cmd_matches
 
         assert _hook_cmd_matches("sudo /path/to/filigree session-context", self.BARE) is False
+
+    def test_actor_option_after_binary_matches(self) -> None:
+        """Task 0.9: ``filigree --actor X session-context`` (both spellings, any
+        binary shape) is still Filigree's hook, so re-install updates it."""
+        from filigree.install_support.hooks import _hook_cmd_matches
+
+        assert _hook_cmd_matches("filigree --actor alice session-context", self.BARE) is True
+        assert _hook_cmd_matches("filigree --actor=alice session-context", self.BARE) is True
+        assert _hook_cmd_matches("/path/to/filigree --actor alice session-context", self.BARE) is True
+        assert _hook_cmd_matches("'/path with spaces/filigree' --actor 'a b' session-context", self.BARE) is True
+        assert _hook_cmd_matches("/usr/bin/python3 -P -m filigree --actor alice session-context", self.BARE) is True
+
+    def test_actor_option_elsewhere_does_not_match(self) -> None:
+        from filigree.install_support.hooks import _hook_cmd_matches
+
+        assert _hook_cmd_matches("filigree session-context --actor alice", self.BARE) is False
+        assert _hook_cmd_matches("filigree --actor session-context", self.BARE) is False
+        assert _hook_cmd_matches("echo --actor alice filigree session-context", self.BARE) is False
+        assert _hook_cmd_matches("filigree --verbose alice session-context", self.BARE) is False
 
     def test_module_form_wrong_module_does_not_match(self) -> None:
         from filigree.install_support.hooks import _hook_cmd_matches

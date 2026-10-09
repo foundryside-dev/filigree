@@ -37,6 +37,7 @@ from pathlib import Path
 
 import filigree
 from filigree.mcp_tools.rename import RENAME_MAP
+from tests.mcp._stale_prose import stale_claims
 
 _SRC_ROOT = Path(filigree.__file__).resolve().parent
 
@@ -94,3 +95,26 @@ def test_prose_emitter_files_have_no_backticked_old_tool_names() -> None:
                 offenders.append(f"{name}:{lineno}: backticked old tool name `{old_name}` (use `{RENAME_MAP[old_name]}`)")
 
     assert not offenders, "Agent-facing prose emitters must reference NEW MCP tool names:\n" + "\n".join(offenders)
+
+
+def _iter_emitted_string_constants(tree: ast.AST) -> list[tuple[int, str]]:
+    """Like :func:`_iter_string_constants` but without bare string statements
+    (docstrings and the like), which are never emitted to an agent."""
+    unemitted = {id(node.value) for node in ast.walk(tree) if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)}
+    return [
+        (node.lineno, node.value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in unemitted
+    ]
+
+
+def test_prose_emitter_files_make_no_stale_claim() -> None:
+    """Task 0.9: the session-context banner and project summary emit no stale
+    claim (archived member as live, ``.filigree/``, ``--agent-id``, ...)."""
+    offenders: list[str] = []
+    for name in _PROSE_EMITTER_FILES:
+        path = _SRC_ROOT / name
+        tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
+        for lineno, text in _iter_emitted_string_constants(tree):
+            offenders.extend(f"{name}:{lineno}: {label}" for _line, label in stale_claims(text))
+    assert not offenders, "Agent-facing prose emitters make stale claims:\n" + "\n".join(offenders)

@@ -51,6 +51,11 @@ def _hook_cmd_matches(hook_command: str, bare_command: str) -> bool:
     - Safe-path module: ``"<python> -P -m filigree session-context"`` — the
       current fallback shape, which avoids prepending the project directory
       during Python module resolution.
+
+    Any of these may carry a group-level ``--actor <id>`` / ``--actor=<id>``
+    immediately after the binary (or ``-m filigree``) — the shape
+    :func:`install_claude_code_hooks` writes when an actor is known — so a
+    re-install updates that hook rather than adding a second one.
     """
     if hook_command == bare_command:
         return True
@@ -65,10 +70,11 @@ def _hook_cmd_matches(hook_command: str, bare_command: str) -> bool:
     bare_bin = bare_tokens[0]  # e.g. "filigree"
 
     # Bare/path form: single binary token followed by the bare subcommand args.
-    if len(hook_tokens) == n:
-        if hook_tokens[1:] != bare_tokens[1:]:
+    bare_form = _without_actor_option(hook_tokens, 1)
+    if len(bare_form) == n:
+        if bare_form[1:] != bare_tokens[1:]:
             return False
-        hook_bin = hook_tokens[0]
+        hook_bin = bare_form[0]
         if hook_bin == bare_bin:
             return True
         hook_base = hook_bin.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
@@ -80,10 +86,40 @@ def _hook_cmd_matches(hook_command: str, bare_command: str) -> bool:
     # so wrappers such as ``env``/``time``/``bash`` remain rejected.
     module_prefixes = (["-m", bare_bin], ["-P", "-m", bare_bin])
     for prefix in module_prefixes:
-        if len(hook_tokens) == n + len(prefix) and hook_tokens[1 : 1 + len(prefix)] == prefix:
-            return hook_tokens[1 + len(prefix) :] == bare_tokens[1:]
+        if hook_tokens[1 : 1 + len(prefix)] != prefix:
+            continue
+        module_form = _without_actor_option(hook_tokens, 1 + len(prefix))
+        if len(module_form) == n + len(prefix):
+            return module_form[1 + len(prefix) :] == bare_tokens[1:]
 
     return False
+
+
+def _without_actor_option(tokens: list[str], at: int) -> list[str]:
+    """Return *tokens* minus one ``--actor <id>`` / ``--actor=<id>`` at index *at*.
+
+    Only that position is considered (right after the binary or module
+    prefix, where the group-level option belongs); a trailing or misplaced
+    ``--actor`` is left in place so the shape check rejects it.
+    """
+    rest = tokens[at:]
+    if len(rest) >= 3 and rest[0] == "--actor":
+        return tokens[:at] + rest[2:]
+    if len(rest) >= 2 and rest[0].startswith("--actor="):
+        return tokens[:at] + rest[1:]
+    return tokens
+
+
+def _hook_actor(tokens: list[str] | None) -> str | None:
+    """Return the ``--actor`` value recorded in a matched hook's tokens, if any."""
+    if not tokens:
+        return None
+    for i, arg in enumerate(tokens):
+        if arg == "--actor" and i + 1 < len(tokens):
+            return tokens[i + 1]
+        if arg.startswith("--actor="):
+            return arg.split("=", 1)[1]
+    return None
 
 
 def _has_hook_command(settings: dict[str, Any], command: str) -> bool:
@@ -309,12 +345,18 @@ def _ensure_pre_tool_use_hook(settings: dict[str, Any], ensure_dashboard_cmd: st
 # ---------------------------------------------------------------------------
 
 
-def install_claude_code_hooks(project_root: Path) -> tuple[bool, str]:
+def install_claude_code_hooks(project_root: Path, *, actor: str | None = None) -> tuple[bool, str]:
     """Register ``filigree session-context`` and ``filigree ensure-dashboard``
     as Claude Code SessionStart hooks in ``.claude/settings.json``.
 
     Uses absolute paths for the filigree binary so hooks work even when
     filigree is installed in a project-local venv that isn't on PATH.
+
+    When *actor* is given the session-context hook is written as
+    ``filigree --actor <actor> session-context`` so the banner can scope the
+    agent's own claims. With no *actor*, an actor already recorded in the
+    existing hook is kept (``doctor --fix`` re-runs this without one); with
+    neither, the plain command is written.
 
     Idempotent — won't duplicate existing entries.  Re-running upgrades
     bare or stale absolute-path commands to the current binary location.
@@ -351,7 +393,9 @@ def install_claude_code_hooks(project_root: Path) -> tuple[bool, str]:
     # shell command is safe on all platforms (e.g. Windows paths with spaces).
     filigree_tokens = find_filigree_command()
     filigree_prefix = shlex.join(filigree_tokens)
-    session_context_cmd = f"{filigree_prefix} session-context"
+    hook_actor = actor if actor is not None else _hook_actor(_extract_hook_tokens(settings, SESSION_CONTEXT_COMMAND))
+    actor_tokens = ["--actor", hook_actor] if hook_actor else []
+    session_context_cmd = shlex.join([*filigree_tokens, *actor_tokens, "session-context"])
     ensure_dashboard_cmd = f"{filigree_prefix} ensure-dashboard"
 
     # Upgrade existing bare/stale commands to current absolute paths
