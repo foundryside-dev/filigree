@@ -10,7 +10,7 @@
     "updated": "2026-04-26",
     "endpoint": "POST /api/weft/claim-next",
     "status": "live as of Phase C3.",
-    "relation_to_classic": "Classic returns 404 NOT_FOUND when nothing is ready (not 200 with empty body); weft matches that, just with the IssueWeft shape on success. The fresh-DB-after-initialize() state is NOT empty: filigree's workflow packs auto-seed a default 'Future' release issue, so claim-next on an unmodified test DB returns that issue. The success-shape replay below relies on that seeding."
+    "relation_to_classic": "Classic returns 404 NOT_FOUND when nothing is ready (not 200 with empty body); weft matches that, just with the IssueWeft shape on success. A fresh DB after initialize() is empty (init seeds no issues), so claim-next on an unmodified test DB returns the 404 below; the populated-success shape is pinned by test_full_lifecycle_pins_issue_weft_shape, which seeds real issues."
   },
   "shape_decl": {
     "request_type": "{assignee: str (required, non-empty), actor?: str}",
@@ -20,7 +20,7 @@
   "examples": [
     {
       "name": "success_default_ready_release",
-      "note": "Replays against the dashboard_surface fixture, which has an initialized DB with the auto-seeded 'Future' release as the highest-priority (P4) ready issue. The IssueWeft shape is pinned by _assert_shape_matches against the body below; values are placeholders (only types are checked).",
+      "note": "Populated-success golden: needs a ready issue, so it is excluded from the unseeded replay (_SEEDED_ONLY_EXAMPLES) and pinned by test_full_lifecycle_pins_issue_weft_shape. Values are placeholders (only types are checked).",
       "request": {
         "method": "POST",
         "path": "/api/weft/claim-next",
@@ -57,6 +57,21 @@
           "children": [],
           "data_warnings": []
         }
+      }
+    },
+    {
+      "name": "error_empty_queue_not_found",
+      "note": "Replays against the unseeded dashboard_surface fixture: a fresh project has no ready issues.",
+      "request": {
+        "method": "POST",
+        "path": "/api/weft/claim-next",
+        "headers": {"Content-Type": "application/json"},
+        "body": {"assignee": "tester"}
+      },
+      "response": {
+        "status": 404,
+        "headers": {"Content-Type": "application/json"},
+        "body": {"error": "No ready issues to claim", "code": "NOT_FOUND"}
       }
     }
   ]

@@ -25,10 +25,12 @@ from filigree.generations.weft.types import (
     IssueWeft,
     ObservationWeft,
     PackWeft,
+    ScanFindingFailureWeft,
     ScanFindingWeft,
     ScanIngestResponseWeft,
     ScannerWeft,
     ScanStats,
+    ScanUnchangedWeft,
     SlimIssueWeft,
     TypeSummaryWeft,
     WeftReasonWeft,
@@ -352,12 +354,16 @@ def scan_ingest_result_to_weft(result: ScanIngestResult) -> ScanIngestResponseWe
       ``observations_failed`` → ``stats`` sibling.
     - ``warnings`` → top-level (kept at top level so consumers that only
       care about operator warnings do not have to reach into ``stats``).
-    - ``failed`` is ``[]`` until per-finding ingest failure tracking
-      lands (non-breaking addition per ADR-002 §3).
+    - ``failed`` carries the per-finding ingest failures (``index`` /
+      ``fingerprint`` / ``code`` / ``reason``); ``[]`` when nothing was
+      dropped.
+    - ``unchanged`` lists replayed findings (already stored, identical).
+    - ``requested`` / ``applied`` / ``rejected_by_kind`` land in ``stats``.
     """
     response = ScanIngestResponseWeft(
         succeeded=list(result["new_finding_ids"]),
-        failed=[],
+        failed=[ScanFindingFailureWeft(**f) for f in result["failed"]],
+        unchanged=[ScanUnchangedWeft(**u) for u in result["unchanged"]],
         stats=ScanStats(
             files_created=result["files_created"],
             files_updated=result["files_updated"],
@@ -365,6 +371,9 @@ def scan_ingest_result_to_weft(result: ScanIngestResult) -> ScanIngestResponseWe
             findings_updated=result["findings_updated"],
             observations_created=result["observations_created"],
             observations_failed=result["observations_failed"],
+            requested=result["requested"],
+            applied=result["applied"],
+            rejected_by_kind=result["rejected_by_kind"],
         ),
         warnings=list(result["warnings"]),
     )

@@ -1852,6 +1852,64 @@ class TestInstallClaudeCodeHooks:
         assert parsed[1:] == ["-m", "filigree", "session-context"]
 
 
+class TestInstallHooksActor:
+    """Task 0.9: the SessionStart hook carries the installing agent's actor so
+    the session-context banner can scope "YOUR CLAIMS" instead of printing
+    "actor unknown — pass --actor"."""
+
+    MOCK_TOKENS = ["/mock/venv/bin/filigree"]  # noqa: RUF012
+
+    def _session_cmds(self, root: Path) -> list[str]:
+        data = json.loads((root / ".claude" / "settings.json").read_text())
+        return [h["command"] for m in data["hooks"]["SessionStart"] for h in m["hooks"] if "session-context" in h["command"]]
+
+    def _install(self, root: Path, actor: str | None = None) -> None:
+        with patch("filigree.install_support.hooks.find_filigree_command", return_value=self.MOCK_TOKENS):
+            ok, msg = install_claude_code_hooks(root, actor=actor)
+        assert ok, msg
+
+    def test_actor_is_written_into_the_session_context_command(self, tmp_path: Path) -> None:
+        self._install(tmp_path, actor="alice")
+        assert self._session_cmds(tmp_path) == ["/mock/venv/bin/filigree --actor alice session-context"]
+
+    def test_reinstall_with_a_different_actor_replaces_not_duplicates(self, tmp_path: Path) -> None:
+        self._install(tmp_path, actor="alice")
+        self._install(tmp_path, actor="bob")
+        assert self._session_cmds(tmp_path) == ["/mock/venv/bin/filigree --actor bob session-context"]
+
+    def test_no_actor_keeps_todays_command(self, tmp_path: Path) -> None:
+        self._install(tmp_path)
+        assert self._session_cmds(tmp_path) == ["/mock/venv/bin/filigree session-context"]
+
+    def test_install_without_actor_preserves_an_existing_hook_actor(self, tmp_path: Path) -> None:
+        """``doctor --fix`` re-runs the hook installer with no actor; it must
+        not silently strip the identity a previous install recorded."""
+        self._install(tmp_path, actor="alice")
+        self._install(tmp_path)
+        assert self._session_cmds(tmp_path) == ["/mock/venv/bin/filigree --actor alice session-context"]
+
+    def test_clear_actor_writes_the_plain_command(self, tmp_path: Path) -> None:
+        self._install(tmp_path, actor="alice")
+        with patch("filigree.install_support.hooks.find_filigree_command", return_value=self.MOCK_TOKENS):
+            ok, msg = install_claude_code_hooks(tmp_path, clear_actor=True)
+        assert ok, msg
+        assert self._session_cmds(tmp_path) == ["/mock/venv/bin/filigree session-context"]
+
+    def test_actor_with_spaces_is_shell_quoted(self, tmp_path: Path) -> None:
+        self._install(tmp_path, actor="agent one")
+        assert self._session_cmds(tmp_path) == ["/mock/venv/bin/filigree --actor 'agent one' session-context"]
+        self._install(tmp_path, actor="bob")
+        assert self._session_cmds(tmp_path) == ["/mock/venv/bin/filigree --actor bob session-context"]
+
+    def test_doctor_recognises_a_hook_with_an_actor(self, tmp_path: Path) -> None:
+        from filigree.install_support.hooks import SESSION_CONTEXT_COMMAND, _extract_hook_binary, _has_hook_command
+
+        self._install(tmp_path, actor="alice")
+        settings = json.loads((tmp_path / ".claude" / "settings.json").read_text())
+        assert _has_hook_command(settings, SESSION_CONTEXT_COMMAND)
+        assert _extract_hook_binary(settings, SESSION_CONTEXT_COMMAND) == "/mock/venv/bin/filigree"
+
+
 class TestInstallHooksMatcherIsolation:
     """Bug filigree-9fb21f2b4b: filigree SessionStart hooks must not be
     appended to a user block whose ``matcher`` scopes it to a subset of
@@ -2229,6 +2287,25 @@ class TestHookCmdMatchesStrict:
         from filigree.install_support.hooks import _hook_cmd_matches
 
         assert _hook_cmd_matches("sudo /path/to/filigree session-context", self.BARE) is False
+
+    def test_actor_option_after_binary_matches(self) -> None:
+        """Task 0.9: ``filigree --actor X session-context`` (both spellings, any
+        binary shape) is still Filigree's hook, so re-install updates it."""
+        from filigree.install_support.hooks import _hook_cmd_matches
+
+        assert _hook_cmd_matches("filigree --actor alice session-context", self.BARE) is True
+        assert _hook_cmd_matches("filigree --actor=alice session-context", self.BARE) is True
+        assert _hook_cmd_matches("/path/to/filigree --actor alice session-context", self.BARE) is True
+        assert _hook_cmd_matches("'/path with spaces/filigree' --actor 'a b' session-context", self.BARE) is True
+        assert _hook_cmd_matches("/usr/bin/python3 -P -m filigree --actor alice session-context", self.BARE) is True
+
+    def test_actor_option_elsewhere_does_not_match(self) -> None:
+        from filigree.install_support.hooks import _hook_cmd_matches
+
+        assert _hook_cmd_matches("filigree session-context --actor alice", self.BARE) is False
+        assert _hook_cmd_matches("filigree --actor session-context", self.BARE) is False
+        assert _hook_cmd_matches("echo --actor alice filigree session-context", self.BARE) is False
+        assert _hook_cmd_matches("filigree --verbose alice session-context", self.BARE) is False
 
     def test_module_form_wrong_module_does_not_match(self) -> None:
         from filigree.install_support.hooks import _hook_cmd_matches
@@ -3498,3 +3575,61 @@ class TestDoctorRedirect:
 
         assert not results["AGENTS.md"].passed
         assert "redirects" in results["AGENTS.md"].message.lower()
+
+
+class TestInstallWritesNoLoomweaveBindings:
+    """4.0 plan D-A (Task 0.11): Filigree's runtime coupling to Loomweave is cut,
+    so a full ``filigree install`` must never originate Loomweave bindings —
+    no ``loomweave.yaml`` created or touched, no ``loomweave`` server entry in
+    ``.mcp.json``, no loomweave registry backend in the project config.
+
+    Regression guard: install writes nothing Loomweave-related today; this
+    pins that so a future installer change cannot quietly reintroduce it.
+    """
+
+    def test_install_writes_no_loomweave_bindings(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from click.testing import CliRunner
+
+        from filigree.cli import cli
+
+        monkeypatch.chdir(tmp_path)
+        # Keep the Codex writer inside tmp_path.
+        fake_home = tmp_path / ".test-home"
+        fake_home.mkdir()
+        monkeypatch.setattr("filigree.install_support.integrations.Path.home", lambda: fake_home)
+        # Force the direct .mcp.json writer: with a real `claude` on PATH the
+        # installer would shell out to `claude mcp add` instead and the
+        # .mcp.json assertions below would be vacuous.
+        real_which = shutil.which
+
+        def _which_without_claude(cmd: str, *args: object, **kwargs: object) -> str | None:
+            if cmd == "claude":
+                return None
+            return real_which(cmd, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr("filigree.install_support.integrations.shutil.which", _which_without_claude)
+
+        # A pre-existing loomweave.yaml (e.g. written by `loomweave install`)
+        # must be left byte-identical.
+        seeded = tmp_path / "loomweave.yaml"
+        seeded_bytes = b"# sentinel: owned by loomweave, not filigree\nserve:\n  port: 1234\n"
+        seeded.write_bytes(seeded_bytes)
+
+        runner = CliRunner()
+        init = runner.invoke(cli, ["init", "--prefix", "lw"])
+        assert init.exit_code == 0, init.output
+        result = runner.invoke(cli, ["install"])
+        assert result.exit_code == 0, result.output
+
+        assert seeded.read_bytes() == seeded_bytes
+        stray = [p for p in tmp_path.rglob("loomweave.y*ml") if p != seeded]
+        assert stray == [], f"install created Loomweave config: {stray}"
+
+        mcp = json.loads((tmp_path / ".mcp.json").read_text())
+        servers = mcp["mcpServers"]
+        assert "filigree" in servers
+        assert not [name for name in servers if "loomweave" in name.lower()], servers
+
+        cfg = json.loads((tmp_path / WEFT_DIR_NAME / WEFT_MEMBER_SUBDIR / CONFIG_FILENAME).read_text())
+        assert "loomweave" not in cfg
+        assert cfg.get("registry_backend", "local") != "loomweave"

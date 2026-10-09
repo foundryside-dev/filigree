@@ -105,6 +105,7 @@ _CHECK_ID_BY_NAME = {
     "Ephemeral port": "dashboard.port",
     "Server daemon": "dashboard.port",
     "Federation token scope": "federation.token_scope",
+    "Federation token file": "federation.token_file",
     "API routes": "api.availability",
     "Auth config": "auth.config",
     "Scan results routes": "scanner.results",
@@ -274,6 +275,34 @@ def _doctor_mcp_token_result(entry: dict[str, object]) -> CheckResult | None:
         fix_hint=hint,
         code="mcp_token_unresolved",
     )
+
+
+def _doctor_empty_future_release(conn: sqlite3.Connection) -> list[CheckResult]:
+    """Flag childless legacy "Future" release rows left behind by the old init seed.
+
+    ``filigree init`` used to seed a ``Future`` release into every tracker, where
+    it surfaced as ready work. A release with ``version == "Future"`` that has no
+    parent/child or dependency links is that seed (or equally empty) and is safe
+    to delete; one with links is real planning and is left alone.
+    """
+    rows = conn.execute(
+        "SELECT i.id FROM issues i "
+        "WHERE i.type = 'release' AND json_valid(i.fields) AND json_extract(i.fields, '$.version') = 'Future' "
+        "AND NOT EXISTS (SELECT 1 FROM issues c WHERE c.parent_id = i.id) "
+        "AND NOT EXISTS (SELECT 1 FROM dependencies d WHERE d.issue_id = i.id OR d.depends_on_id = i.id) "
+        "ORDER BY i.id"
+    ).fetchall()
+    return [
+        CheckResult(
+            "Future release",
+            False,
+            f"Empty legacy 'Future' release {row[0]} (no children or dependencies) shows up as ready work",
+            fix_hint="Run: filigree doctor --fix (deletes the empty Future release)",
+            code="empty_future_release",
+            fix_target=row[0],
+        )
+        for row in rows
+    ]
 
 
 def _doctor_file_registry_backend_state(
@@ -730,6 +759,114 @@ def _doctor_federation_token_checks(project_root: Path, mode: str) -> list[Check
     return results
 
 
+def _live_daemon_health(project_root: Path, mode: str) -> dict[str, Any] | None:
+    """Best-effort ``/api/health`` payload of a live daemon serving this store.
+
+    Server mode: the PID-verified shared daemon (:func:`filigree.server.daemon_status`)
+    on its configured port. Otherwise: the ephemeral dashboard on the port recorded
+    in the store's ``ephemeral.port`` (the same file the "Ephemeral port" check
+    reads). The listener must identify itself with the expected ``mode`` — any
+    error, timeout, or unidentified listener returns ``None`` (no daemon known).
+    """
+    import urllib.request
+
+    try:
+        if mode == "server":
+            from filigree.server import daemon_status
+
+            status = daemon_status()
+            port = status.port if status.running else None
+            expected_modes: tuple[str, ...] = ("server",)
+        else:
+            from filigree.core import LEGACY_EPHEMERAL_MODE
+            from filigree.ephemeral import read_port_file
+
+            port = read_port_file(resolve_store_dir(project_root) / "ephemeral.port")
+            expected_modes = (EPHEMERAL_MODE, LEGACY_EPHEMERAL_MODE)
+        if not port:
+            return None
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=0.5) as resp:
+            payload = json.loads(resp.read(65536))
+    except Exception:
+        return None
+    if isinstance(payload, dict) and payload.get("mode") in expected_modes:
+        return payload
+    return None
+
+
+def _doctor_federation_token_file_check(project_root: Path, mode: str) -> list[CheckResult]:
+    """Published token file vs the active env token (HTTP F14 / M-6).
+
+    Same-host siblings (Wardline, Loomweave) authenticate with the value they read
+    from ``<store>/federation_token``. A daemon started with an env token that
+    differs from that file enforces the env token, so every such sibling 401s.
+    Reports the mismatch only (an absent file is minted, with the env value, by
+    boot / ``--fix``); ``doctor --fix`` realigns the file via
+    :func:`filigree.federation_token.reconcile_token_file`.
+
+    Inspects the same file daemon boot reconciles: the project store for a
+    single-project daemon, the server config dir in server mode. A server-mode
+    *project* token is deliberately not compared — the daemon accepts it for its
+    own scope alongside the env pin, so it differing from the env is not a 401,
+    and rewriting it would orphan a ``.mcp.json`` that embeds it literally.
+
+    The env token is *this* shell's — it is the daemon's only when the daemon was
+    started from the same environment. Never prints a token value.
+    """
+    from filigree.federation_token import read_env_token, read_token_file, token_fingerprint
+
+    env_token, env_name = read_env_token()
+    if not env_token:
+        return []
+    if mode == "server":
+        from filigree.server import SERVER_CONFIG_DIR
+
+        store_dir = SERVER_CONFIG_DIR
+    else:
+        store_dir = resolve_store_dir(project_root)
+    file_token = read_token_file(store_dir)
+    if not file_token or file_token == env_token:
+        return []
+
+    # Guard the --fix against reconciling to the wrong env: the env read above is
+    # THIS shell's. If a live daemon for this store says the published file
+    # already matches the token it enforces, the file is right and the shell is
+    # the odd one out — rewriting the file to the shell's value would 401 every
+    # sibling. Report only (a code --fix does not route). No daemon answering, or
+    # one reporting a mismatch / predating the field, keeps the fixable result.
+    health = _live_daemon_health(project_root, mode)
+    daemon_auth = health.get("auth") if health is not None else None
+    if isinstance(daemon_auth, dict) and daemon_auth.get("file_matches_active") is True:
+        return [
+            CheckResult(
+                "Federation token file",
+                False,
+                f"this shell's {env_name} (fingerprint {token_fingerprint(env_token)}) differs from "
+                f"{store_dir}/federation_token (fingerprint {token_fingerprint(file_token)}), but the running daemon "
+                "reports the published file matches the token it enforces — the shell env is stale, not the file; "
+                "not rewriting it",
+                fix_hint=(
+                    f"Unset or correct {env_name} in this shell (clients using it will 401); "
+                    "the published token file is already what the daemon accepts."
+                ),
+                code="federation_token_shell_env_mismatch",
+            )
+        ]
+
+    return [
+        CheckResult(
+            "Federation token file",
+            False,
+            f"{store_dir}/federation_token (fingerprint {token_fingerprint(file_token)}) differs from the active "
+            f"{env_name} (fingerprint {token_fingerprint(env_token)}); a daemon started with {env_name} rejects "
+            "siblings that send the published file token (HTTP 401)",
+            fix_hint=f"Run `filigree doctor --fix` to rewrite the token file to the active {env_name} value.",
+            code="federation_token_file_mismatch",
+            fix_target=str(store_dir),
+        )
+    ]
+
+
 def _check_codex_mcp(filigree_dir: Path) -> CheckResult:
     """Check Codex MCP configuration with early returns for clarity."""
     codex_config = _codex_config_path()
@@ -1007,6 +1144,7 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
                     )
                 else:
                     results.append(CheckResult("Schema version", True, f"v{schema_version}"))
+                    results.extend(_doctor_empty_future_release(conn))
                     registry_state = _doctor_file_registry_backend_state(
                         conn,
                         registry_settings=conf_data if conf_data is not None else config_data,
@@ -1391,6 +1529,9 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
 
     # 12b. Federation token scope divergence (server-mode, multi-store).
     results.extend(_doctor_federation_token_checks(project_root, mode))
+
+    # 12c. Published federation token file vs the active env token (any mode).
+    results.extend(_doctor_federation_token_file_check(project_root, mode))
 
     # 13. Check dashboard/API route registration without mutating records.
     results.extend(_doctor_dashboard_contract_checks(project_root))

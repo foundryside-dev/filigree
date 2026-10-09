@@ -34,6 +34,7 @@ from pathlib import Path
 
 import filigree
 from filigree.mcp_tools.rename import RENAME_MAP
+from tests.mcp._stale_prose import stale_claims
 
 _SRC_ROOT = Path(filigree.__file__).resolve().parent
 _REPO_ROOT = _SRC_ROOT.parent.parent
@@ -85,3 +86,64 @@ def test_guard_can_detect_an_old_name() -> None:
     sample_new = RENAME_MAP[sample_old]
     assert _BACKTICKED_OLD_NAME_RE.search(f"call `{sample_old}` to read it")
     assert not _BACKTICKED_OLD_NAME_RE.search(f"call `{sample_new}` to read it")
+
+
+# ---------------------------------------------------------------------------
+# Stale behavioural claims (Task 0.9; LX-11, LX-14, LX-16)
+# ---------------------------------------------------------------------------
+#
+# Same curated file set: the served/agent-facing markdown. ``data/instructions.md``
+# is the template of the managed CLAUDE.md / AGENTS.md block, so guarding it
+# guards every regenerated block. The packaged skill additionally gets the
+# skill-only rules ("2.0" version framing). History (CHANGELOG, ADRs, PDRs,
+# docs/plans/, docs/superpowers/) is deliberately not in this set.
+
+_SKILL_DIR = _SRC_ROOT / "skills" / "filigree-workflow"
+
+
+def test_no_markdown_doc_makes_a_stale_claim() -> None:
+    """No curated agent-facing doc names Legis/Warpline as live, claims
+    ``--agent-id``, points at ``.filigree/``, documents ``current_assignee`` or a
+    CLI exit 4 — and no skill sheet frames itself as "filigree 2.0"."""
+    offenders: list[str] = []
+    for path in _DOC_FILES:
+        skill = _SKILL_DIR in path.parents
+        for lineno, label in stale_claims(path.read_text(encoding="utf-8"), skill=skill):
+            offenders.append(f"{path.relative_to(_REPO_ROOT)}:{lineno}: {label}")
+    assert not offenders, "Agent-facing markdown makes stale claims:\n" + "\n".join(offenders)
+
+
+def test_stale_claim_rules_fire_and_spare_identifiers() -> None:
+    """Sanity: each rule fires on a stale sentence, and code identifiers,
+    quoted values and "archived" history do not."""
+    for stale in (
+        "Prefer the `mcp__legis__*` tools.",
+        "Run warpline to see the blast radius.",
+        "Pass the MCP launch-bound `--agent-id`.",
+        "Filigree data lives in `.filigree/`.",
+        'details: {current_assignee: "agent-1"}',
+        "A CONFLICT exits with code 4.",
+        "CONFLICT → CLI exit 4, retryable",
+        "Exit status 4 means conflict.",
+        # Review round 1: globs are unconditional, the archived exemption is
+        # same-sentence only, and a bare backticked name is a tool claim.
+        "Prefer the `mcp__legis__*` tools for overrides. Closed issues are archived after 30 days.",
+        'Use Warpline to compute blast radius; "state" was retired as a word.',
+        "Fall back to the `legis` CLI.",
+        "Run `warpline` before claiming done.",
+    ):
+        assert stale_claims(stale), stale
+    assert stale_claims("Protocols for filigree 2.0.", skill=True)
+    for clean in (
+        "`legis_client.py` and `LEGIS_URL` are code identifiers.",
+        "The `warpline_worklist_ingest` tool reads `warpline.reverify_worklist.v1`.",
+        "The actor defaults to 'warpline'.",
+        "Identity recorded as attached_by (default 'warpline').",
+        "Filed items carry the producer labels (`warpline`, `federation`).",
+        "Legis is retired and is never consulted.",
+        "The Warpline producer is archived.",
+        "The store lives in `.weft/filigree/`.",
+        "Every error envelope exits 1.",
+        "Standardised since 2.0.",
+    ):
+        assert not stale_claims(clean), clean

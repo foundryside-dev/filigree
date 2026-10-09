@@ -38,15 +38,15 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
         Tool(
             name="ingest_warpline_worklist",
             description=(
-                "Consume a warpline reverify worklist (warpline.reverify_worklist.v1) and "
-                "file-or-link its items as Filigree work — the write-capable half of the "
-                "warpline<->filigree seam. Per item, keyed on the entity SEI: an entity already "
-                "tracked by an open issue is reported as 'linked' (never re-filed); an "
-                "untracked entity is 'filed' as a task carrying the warpline producer labels and "
-                "an ADR-029 affected-entity association on the SEI (the surface warpline reads "
-                "back, closing the loop); an item with no SEI is 'skipped'. warpline never "
-                "auto-files: this call IS the explicit action, and it previews by default "
-                "(apply=false, pure reads) — pass apply=true to perform the writes."
+                "Consume a reverify worklist (warpline.reverify_worklist.v1) from the archived "
+                "Warpline producer and file-or-link its items as Filigree work; kept for "
+                "already-produced worklists and removed in 4.0. Per item, keyed on the entity SEI: "
+                "an entity already tracked by an open issue is reported as 'linked' (never "
+                "re-filed); an untracked entity is 'filed' as a task carrying the producer labels "
+                "('warpline', 'federation') and an affected-entity association on the SEI; an "
+                "item with no SEI is 'skipped'. Nothing is filed implicitly: this call IS the "
+                "explicit action, and it previews by default (apply=false, pure reads) — pass "
+                "apply=true to perform the writes."
             ),
             inputSchema={
                 "type": "object",

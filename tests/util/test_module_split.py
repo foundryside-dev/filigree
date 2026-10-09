@@ -139,7 +139,9 @@ def test_undo_last_available(db: FiligreeDB) -> None:
     """undo_last should work through mixin composition."""
     issue = db.create_issue(title="original")
     db.update_issue(issue.id, title="changed")
-    result = db.undo_last(issue.id)
+    target = db.undo_candidate_event_id(issue.id)
+    assert target is not None
+    result = db.undo_last(issue.id, expected_event_id=target)
     assert result["event_type"] == "title_changed"  # type: ignore[typeddict-item]
 
 
@@ -326,7 +328,8 @@ def test_claim_and_release(db: FiligreeDB) -> None:
     issue = db.create_issue(title="claimable")
     claimed = db.claim_issue(issue.id, assignee="agent-1")
     assert claimed.assignee == "agent-1"
-    released = db.release_claim(issue.id)
+    released = db.release_claim(issue.id, actor="agent-1")
+    assert released is not None
     assert released.assignee == ""
 
 

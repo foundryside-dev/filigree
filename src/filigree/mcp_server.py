@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import functools
 import json
 import logging
 import sqlite3
@@ -48,6 +49,7 @@ from filigree.core import (
 )
 from filigree.db_schema import CURRENT_SCHEMA_VERSION
 from filigree.install_support.version_marker import format_schema_mismatch_guidance
+from filigree.logging import CallOutcome
 from filigree.mcp_runtime import McpRuntimeContext, McpToolMetadata, set_runtime_context
 from filigree.mcp_tools.common import (  # noqa: F401  — re-exported for backward compat
     _MAX_LIST_RESULTS,
@@ -387,7 +389,7 @@ from filigree.mcp_tools import (  # noqa: E402, I001  — must come after global
     scanners as _scanners_mod,
     workflow as _workflow_mod,
 )
-from filigree.mcp_tools.rename import NEW_TO_OLD, RENAME_MAP  # noqa: E402
+from filigree.mcp_tools.rename import NEW_TO_OLD, REMOVED_PARAMETERS, RENAME_MAP  # noqa: E402
 from filigree.mcp_tools.tiers import tier_for  # noqa: E402
 
 _all_tools: list[Tool] = []
@@ -534,6 +536,15 @@ def _unknown_argument_error(tool_name: str, arguments: object) -> ErrorResponse 
     unknown = sorted(key for key in arguments if isinstance(key, str) and key not in allowed)
     if not unknown:
         return None
+    for key in unknown:
+        tombstone = REMOVED_PARAMETERS.get((tool_name, key))
+        if tombstone is not None:
+            served = RENAME_MAP.get(tool_name, tool_name)
+            return ErrorResponse(
+                error=f"Parameter {key!r} was removed from {served}: {tombstone['migration']}",
+                code=ErrorCode.VALIDATION,
+                details={"parameter": key, **tombstone},
+            )
     unknown_label = ", ".join(unknown)
     return ErrorResponse(
         error=f"Unknown parameter(s) for {tool_name}: {unknown_label}",
@@ -720,7 +731,7 @@ _WORKFLOW_TEXT_STATIC = """\
 # Filigree Workflow
 
 You are working in a project that uses **filigree** for issue tracking.
-Filigree data lives in `.filigree/` and is accessed via these MCP tools.
+Filigree data lives in the project's store (`.weft/filigree/` by default) and is accessed via these MCP tools.
 
 ## Quick start
 1. Read `filigree://context` resource for current project state (vitals, ready work, blockers)
@@ -746,7 +757,7 @@ Filigree data lives in `.filigree/` and is accessed via these MCP tools.
 - **stats_get / summary_get** — project analytics
 - **metrics_get** — flow metrics (cycle time, lead time, throughput)
 - **dependency_critical_path** — longest dependency chain among open issues
-- **admin_reload_templates** — refresh templates after editing .filigree/templates/
+- **admin_reload_templates** — refresh templates after editing the store's templates/
 
 ## Conventions
 - Issue IDs: `{prefix}-{10hex}` (e.g., `myproj-a3f9b2e1c0`)
@@ -867,10 +878,79 @@ async def list_tools() -> list[Tool]:
     return _served_tools
 
 
+_UNKNOWN_TOOL_LABEL = "<unknown>"
+
+
+def _call_log_population() -> str | None:
+    """Population tag of the project this call is served for (None when unknown)."""
+    from filigree.logging import population_for
+
+    active = _request_db.get() or db
+    return population_for(active.meta_dir if active is not None else _filigree_dir)
+
+
+def _log_call(
+    served_name: str,
+    arguments: object,
+    t0: float,
+    outcome: CallOutcome,
+    code: str | None,
+) -> None:
+    """Emit the shared ``event="call"`` record for one MCP tool call."""
+    from filigree.logging import log_outcome
+
+    log_outcome(
+        _logger or logging.getLogger("filigree"),
+        surface="mcp",
+        name=served_name,
+        outcome=outcome,
+        code=code,
+        duration_ms=round((time.monotonic() - t0) * 1000, 1),
+        population=_call_log_population(),
+        extra={"tool": served_name, "args_data": arguments},
+        msg="tool_call",
+    )
+
+
+def _classify_tool_result(result: list[TextContent]) -> tuple[CallOutcome, str | None]:
+    """Derive ``(outcome, code)`` from the returned envelope, not just exceptions."""
+    from filigree.logging import classify_body
+
+    if not result:
+        return "ok", None
+    try:
+        body = json.loads(result[0].text)
+    except (json.JSONDecodeError, TypeError, AttributeError):
+        return "ok", None
+    return classify_body(body)
+
+
 @server.call_tool()  # type: ignore[untyped-decorator]
 async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     t0 = time.monotonic()
+    # Log the *served* (namespaced) name. Legacy names and unknown names are
+    # never logged verbatim: the former are removed wire surface, the latter
+    # are unbounded client input.
+    served_name = name if name in NEW_TO_OLD else _UNKNOWN_TOOL_LABEL
+    try:
+        result = await _dispatch_call_tool(name, arguments)
+    except Exception as exc:
+        # Validator rejections raised out of the dispatch path are dead-ends of
+        # the "validation" kind; everything else is an internal error. Re-raise
+        # either way so the SDK still answers the caller.
+        # ``ValidationError`` by name: jsonschema/pydantic both raise one, and
+        # neither is a direct dependency worth importing just to match on.
+        if type(exc).__name__ == "ValidationError":
+            _log_call(served_name, arguments, t0, "validation", ErrorCode.VALIDATION)
+        else:
+            _log_call(served_name, arguments, t0, "error", ErrorCode.INTERNAL)
+        raise
+    outcome, code = _classify_tool_result(result)
+    _log_call(served_name, arguments, t0, outcome, code)
+    return result
 
+
+async def _dispatch_call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     # Canonicalize at the very top: the namespaced ``<entity>_<verb>`` names
     # served by ``list_tools`` are the ONLY accepted wire surface. Resolve each
     # inbound new name to its canonical (old) internal identity so EVERY
@@ -990,6 +1070,14 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
         return _common_text(schema_validation_error)
 
+    # Pre-lock hooks (final review I4): slow work that touches no DB
+    # transaction -- today only issue_close's git reachability check -- runs
+    # here, before the per-project lock, so it cannot stall sibling calls. The
+    # handler receives the result as ``_prepared``.
+    pre_lock = _issues_mod.PRE_LOCK_HOOKS.get(name)
+    if pre_lock is not None:
+        handler = functools.partial(handler, _prepared=await pre_lock(arguments))
+
     # Serialise tool execution per-DB. The MCP SDK dispatches tool calls
     # concurrently; the shared ``sqlite3.Connection`` on ``FiligreeDB`` has
     # no transaction isolation between coroutines, and the finally-rollback
@@ -1020,10 +1108,42 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         async with lock:
             result = await _run()
 
-    duration_ms = round((time.monotonic() - t0) * 1000, 1)
-    if _logger:
-        _logger.info("tool_call", extra={"tool": name, "args_data": arguments, "duration_ms": duration_ms})
     return result
+
+
+def _install_sdk_rejection_logging() -> None:
+    """Log SDK-level ``inputSchema`` rejections as ``validation`` calls.
+
+    The MCP SDK validates ``arguments`` against the tool's ``inputSchema`` *before*
+    ``call_tool`` runs and answers with an ``isError`` result, so those dead-ends
+    never reach the wrapper above. Wrap the registered request handler to record
+    them.
+    """
+    from mcp.types import CallToolRequest
+
+    original = server.request_handlers[CallToolRequest]
+
+    async def _logged(req: CallToolRequest) -> Any:
+        t0 = time.monotonic()
+        result = await original(req)
+        root = getattr(result, "root", None)
+        content = getattr(root, "content", None) or []
+        text = getattr(content[0], "text", "") if content else ""
+        if getattr(root, "isError", False) and isinstance(text, str) and text.startswith("Input validation error"):
+            requested = req.params.name
+            _log_call(
+                requested if requested in NEW_TO_OLD else _UNKNOWN_TOOL_LABEL,
+                req.params.arguments or {},
+                t0,
+                "validation",
+                ErrorCode.VALIDATION,
+            )
+        return result
+
+    server.request_handlers[CallToolRequest] = _logged
+
+
+_install_sdk_rejection_logging()
 
 
 # ---------------------------------------------------------------------------

@@ -113,7 +113,7 @@ class TestIssuesAPI:
         assert resp.status_code == 200
         data = resp.json()
         assert isinstance(data, list)
-        assert len(data) == 5  # epic + A + B + C + auto-seeded Future release
+        assert len(data) == 4  # epic + A + B + C
 
     async def test_list_all_issues_paginates_beyond_single_page(
         self,
@@ -717,11 +717,40 @@ class TestClaimAPI:
         dashboard_db.db.claim_issue(ids["a"], assignee="agent-1")
         resp = await client.post(
             f"/api/issue/{ids['a']}/release",
-            json={},
+            json={"actor": "agent-1"},
         )
         assert resp.status_code == 200
         data = resp.json()
         assert data["assignee"] == ""
+
+    async def test_release_claim_by_non_holder_is_conflict_by_default(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        """Task 0.4: release is holder-checked with no opt-in (the default actor is 'dashboard')."""
+        ids = dashboard_db.ids
+        dashboard_db.db.claim_issue(ids["a"], assignee="agent-1")
+
+        resp = await client.post(f"/api/issue/{ids['a']}/release", json={})
+
+        assert resp.status_code == 409
+        assert resp.json()["code"] == "CONFLICT"
+        assert dashboard_db.db.get_issue(ids["a"]).assignee == "agent-1"
+
+    async def test_release_claim_override_is_coordinator_release(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        """The dashboard Release button posts {override: true}; it is audited."""
+        ids = dashboard_db.ids
+        dashboard_db.db.claim_issue(ids["a"], assignee="agent-1")
+
+        resp = await client.post(f"/api/weft/issues/{ids['a']}/release", json={"override": True})
+
+        assert resp.status_code == 200
+        assert resp.json()["assignee"] == ""
+        events = dashboard_db.db.get_issue_events(ids["a"])
+        assert [e["actor"] for e in events if e["event_type"] == "released_by_override"] == ["dashboard"]
+
+    async def test_release_claim_unassigned_is_idempotent(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        ids = dashboard_db.ids
+        resp = await client.post(f"/api/weft/issues/{ids['a']}/release", json={"actor": "agent-1"})
+        assert resp.status_code == 200
+        assert resp.json()["assignee"] == ""
 
     async def test_release_if_held_unassigned_classic(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
         ids = dashboard_db.ids
@@ -733,16 +762,38 @@ class TestClaimAPI:
         assert resp.json()["assignee"] == ""
 
     async def test_release_if_held_expected_assignee_weft(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        """Review ruling (a): a non-holder naming the holder is refused; only
+        override releases (and is audited as released_by_override)."""
+        ids = dashboard_db.ids
+        dashboard_db.db.claim_issue(ids["a"], assignee="agent-1")
+        body = {"actor": "coordinator", "if_held": True, "expected_assignee": "agent-1"}
+
+        refused = await client.post(f"/api/weft/issues/{ids['a']}/release", json=body)
+
+        assert refused.status_code == 409
+        assert dashboard_db.db.get_issue(ids["a"]).assignee == "agent-1"
+
+        resp = await client.post(f"/api/weft/issues/{ids['a']}/release", json={**body, "override": True})
+
+        assert resp.status_code == 200
+        assert resp.json()["assignee"] == ""
+        events = dashboard_db.db.get_issue_events(ids["a"])
+        assert [e["actor"] for e in events if e["event_type"] == "released_by_override"] == ["coordinator"]
+
+    async def test_release_non_holder_naming_holder_is_conflict_classic(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
         ids = dashboard_db.ids
         dashboard_db.db.claim_issue(ids["a"], assignee="agent-1")
 
         resp = await client.post(
-            f"/api/weft/issues/{ids['a']}/release",
-            json={"actor": "coordinator", "if_held": True, "expected_assignee": "agent-1"},
+            f"/api/issue/{ids['a']}/release",
+            json={"actor": "mallory", "expected_assignee": "agent-1"},
         )
 
-        assert resp.status_code == 200
-        assert resp.json()["assignee"] == ""
+        assert resp.status_code == 409
+        body = resp.json()
+        assert body["code"] == "CONFLICT"
+        assert body["details"] == {"issue_id": ids["a"], "observed": "agent-1", "expected": "mallory"}
+        assert dashboard_db.db.get_issue(ids["a"]).assignee == "agent-1"
 
     async def test_release_if_held_rejects_other_assignee_classic(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
         ids = dashboard_db.ids

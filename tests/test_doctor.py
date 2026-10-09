@@ -2242,3 +2242,225 @@ class TestDoctorFederationTokenChecks:
 
         results = _doctor_federation_token_checks(tmp_path, "server")
         assert not any(r.code == "federation_token_divergence" for r in results), results
+
+
+# ---------------------------------------------------------------------------
+# Federation token file vs active env token (HTTP F14 / M-6)
+# ---------------------------------------------------------------------------
+
+
+class TestDoctorFederationTokenFileMismatch:
+    """Siblings read ``<store>/federation_token``; an env token that differs from
+    it means the daemon (started with that env) 401s every sibling. Doctor
+    reports the mismatch and ``--fix`` realigns the file to the env token."""
+
+    @pytest.fixture(autouse=True)
+    def _no_live_daemon(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Hermetic: never probe a real daemon (the dev box runs one on :8749).
+        Tests exercising the live-daemon guard override this stub."""
+        monkeypatch.setattr("filigree.install_support.doctor._live_daemon_health", lambda _root, _mode: None)
+
+    def _clear_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for v in ("WEFT_FEDERATION_TOKEN", "FILIGREE_FEDERATION_API_TOKEN", "FILIGREE_API_TOKEN"):
+            monkeypatch.delenv(v, raising=False)
+
+    def test_live_daemon_matching_file_downgrades_to_report_only(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A running daemon reports the published file matches what it enforces:
+        the shell env is the stale side. Doctor reports that and --fix must NOT
+        rewrite the file to the shell's value (that would 401 every sibling)."""
+        from filigree.cli_commands.admin import _apply_doctor_fixes
+
+        self._clear_env(monkeypatch)
+        project = _make_project(tmp_path)
+        token_file = project / FILIGREE_DIR_NAME / "federation_token"
+        token_file.write_text("daemon-enforced-tok\n")
+        monkeypatch.setenv("WEFT_FEDERATION_TOKEN", "stale-shell-tok")
+        probed: list[tuple[Path, str]] = []
+
+        def fake_probe(root: Path, mode: str) -> dict[str, object]:
+            probed.append((root, mode))
+            return {"status": "ok", "mode": "ephemeral", "auth": {"file_matches_active": True}}
+
+        monkeypatch.setattr("filigree.install_support.doctor._live_daemon_health", fake_probe)
+
+        results = run_doctor(project)
+        assert probed, "the guard must consult the live-daemon probe"
+        assert not any(r.code == "federation_token_file_mismatch" for r in results)
+        shell = [r for r in results if r.code == "federation_token_shell_env_mismatch"]
+        assert len(shell) == 1
+        assert shell[0].passed is False
+        assert "running daemon" in shell[0].message
+        assert "daemon-enforced-tok" not in shell[0].message
+        assert "stale-shell-tok" not in shell[0].message
+
+        monkeypatch.chdir(project)
+        _fixed, fixed_ids, _names = _apply_doctor_fixes(results, emit=None)
+        assert "federation.token_file" not in fixed_ids
+        assert token_file.read_text().strip() == "daemon-enforced-tok"  # file left alone
+
+    @pytest.mark.parametrize(
+        "health",
+        [
+            None,  # no daemon answers
+            {"status": "ok", "mode": "ephemeral", "auth": {"file_matches_active": False}},  # daemon enforces env
+            {"status": "ok", "mode": "ephemeral", "auth": {"federation": {"enabled": True}}},  # pre-field daemon
+        ],
+    )
+    def test_no_daemon_vouching_for_file_keeps_fix(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, health: dict[str, object] | None
+    ) -> None:
+        from filigree.cli_commands.admin import _apply_doctor_fixes
+
+        self._clear_env(monkeypatch)
+        project = _make_project(tmp_path)
+        token_file = project / FILIGREE_DIR_NAME / "federation_token"
+        token_file.write_text("stale-file-tok\n")
+        monkeypatch.setenv("WEFT_FEDERATION_TOKEN", "env-active-tok")
+        monkeypatch.setattr("filigree.install_support.doctor._live_daemon_health", lambda _root, _mode: health)
+
+        results = run_doctor(project)
+        assert any(r.code == "federation_token_file_mismatch" for r in results)
+        monkeypatch.chdir(project)
+        _apply_doctor_fixes(results, emit=None)
+        assert token_file.read_text().strip() == "env-active-tok"
+
+    def test_doctor_flags_mismatch_and_fix_reconciles(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from filigree.cli_commands.admin import _apply_doctor_fixes
+
+        self._clear_env(monkeypatch)
+        project = _make_project(tmp_path)
+        token_file = project / FILIGREE_DIR_NAME / "federation_token"
+        token_file.write_text("stale-file-tok\n")
+        monkeypatch.setenv("WEFT_FEDERATION_TOKEN", "env-active-tok")
+
+        results = run_doctor(project)
+        mismatch = [r for r in results if r.code == "federation_token_file_mismatch"]
+        assert len(mismatch) == 1, [r.name for r in results]
+        assert mismatch[0].passed is False
+        assert "WEFT_FEDERATION_TOKEN" in mismatch[0].message
+        assert "doctor --fix" in mismatch[0].fix_hint
+        # Never leak a token value into human/JSON doctor output.
+        assert "stale-file-tok" not in mismatch[0].message
+        assert "env-active-tok" not in mismatch[0].message
+        assert doctor_check_id(mismatch[0]) == "federation.token_file"
+
+        monkeypatch.chdir(project)
+        fixed, fixed_ids, _names = _apply_doctor_fixes(results, emit=None)
+        assert fixed >= 1
+        assert "federation.token_file" in fixed_ids
+        assert token_file.read_text().strip() == "env-active-tok"
+        assert oct(token_file.stat().st_mode & 0o777) == oct(0o600)
+
+        again = run_doctor(project)
+        assert not any(r.code == "federation_token_file_mismatch" for r in again)
+
+    @pytest.mark.parametrize(
+        ("env", "file"),
+        [
+            (None, "file-tok"),  # no env → file is the credential, nothing to reconcile
+            ("same-tok", "same-tok"),  # aligned
+            ("env-tok", None),  # no file → boot/install mint writes the env value
+        ],
+    )
+    def test_no_mismatch_reported(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, env: str | None, file: str | None) -> None:
+        self._clear_env(monkeypatch)
+        project = _make_project(tmp_path)
+        if file is not None:
+            (project / FILIGREE_DIR_NAME / "federation_token").write_text(file + "\n")
+        if env is not None:
+            monkeypatch.setenv("WEFT_FEDERATION_TOKEN", env)
+
+        results = run_doctor(project)
+        assert not any(r.code == "federation_token_file_mismatch" for r in results)
+
+    def test_server_mode_checks_home_file_not_project_token(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Server mode: boot reconciles the server config dir, so doctor compares
+        that file. A per-project token differing from the env pin is accepted for
+        its own scope (not a 401) and must not be flagged or rewritten — a
+        server-mode .mcp.json embeds it literally."""
+        from filigree.cli_commands.admin import _apply_doctor_fixes
+
+        self._clear_env(monkeypatch)
+        (tmp_path / "p").mkdir()
+        project = _make_project(tmp_path / "p")
+        write_config(project / FILIGREE_DIR_NAME, {"prefix": "tst", "version": 1, "mode": "server"})
+        project_file = project / FILIGREE_DIR_NAME / "federation_token"
+        project_file.write_text("tok-proj\n")
+        config_dir = tmp_path / "_srvcfg"
+        config_dir.mkdir()
+        (config_dir / "server.json").write_text(json.dumps({"port": 8377, "projects": {}}))
+        home_file = config_dir / "federation_token"
+        home_file.write_text("stale-home-tok\n")
+        monkeypatch.setattr("filigree.server.SERVER_CONFIG_DIR", config_dir)
+        monkeypatch.setattr("filigree.server.SERVER_CONFIG_FILE", config_dir / "server.json")
+        monkeypatch.setenv("WEFT_FEDERATION_TOKEN", "env-pin")
+
+        results = run_doctor(project)
+        mismatch = [r for r in results if r.code == "federation_token_file_mismatch"]
+        assert len(mismatch) == 1
+        assert mismatch[0].fix_target == str(config_dir)
+
+        monkeypatch.chdir(project)
+        _apply_doctor_fixes(results, emit=None)
+        assert home_file.read_text().strip() == "env-pin"
+        assert project_file.read_text().strip() == "tok-proj"  # project token untouched
+
+
+# ---------------------------------------------------------------------------
+# run_doctor — empty legacy "Future" release (init no longer seeds one)
+# ---------------------------------------------------------------------------
+
+
+class TestDoctorEmptyFutureRelease:
+    @staticmethod
+    def _add_future(project: Path, *, with_child: bool = False) -> str:
+        db = FiligreeDB(project / FILIGREE_DIR_NAME / DB_FILENAME, prefix="tst")
+        db.initialize()
+        try:
+            release = db.create_issue("Future", type="release", fields={"version": "Future"})
+            if with_child:
+                db.create_issue("Planned item", parent_id=release.id)
+            return release.id
+        finally:
+            db.close()
+
+    @staticmethod
+    def _future_results(results: list[CheckResult]) -> list[CheckResult]:
+        return [r for r in results if r.code == "empty_future_release"]
+
+    def test_no_future_release_no_result(self, tmp_path: Path) -> None:
+        _make_project(tmp_path)
+        assert self._future_results(run_doctor(tmp_path)) == []
+
+    def test_childless_future_release_is_reported(self, tmp_path: Path) -> None:
+        _make_project(tmp_path)
+        release_id = self._add_future(tmp_path)
+        (result,) = self._future_results(run_doctor(tmp_path))
+        assert result.passed is False
+        assert result.fix_target == release_id
+        assert "doctor --fix" in result.fix_hint
+
+    def test_future_release_with_children_is_left_alone(self, tmp_path: Path) -> None:
+        _make_project(tmp_path)
+        self._add_future(tmp_path, with_child=True)
+        assert self._future_results(run_doctor(tmp_path)) == []
+
+    def test_doctor_fix_deletes_childless_future_release(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from filigree.cli_commands.admin import _apply_doctor_fixes
+
+        _make_project(tmp_path)
+        release_id = self._add_future(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        results = self._future_results(run_doctor(tmp_path))
+
+        fixed, fixed_ids, _ = _apply_doctor_fixes(results, emit=None)
+
+        assert fixed == 1
+        assert fixed_ids
+        db = FiligreeDB(tmp_path / FILIGREE_DIR_NAME / DB_FILENAME, prefix="tst")
+        try:
+            with pytest.raises(KeyError):
+                db.get_issue(release_id)
+        finally:
+            db.close()
+        assert self._future_results(run_doctor(tmp_path)) == []

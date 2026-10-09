@@ -18,10 +18,10 @@ import sqlite3
 import sys
 import tempfile
 import tomllib
-import uuid as _uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast, get_args
 
+from filigree.commit_reachability import DEFAULT_INTEGRATION_REF
 from filigree.db_annotations import (
     VALID_ANNOTATION_INTENTS,
     VALID_ANNOTATION_RELATIONSHIPS,
@@ -29,7 +29,6 @@ from filigree.db_annotations import (
     VALID_ANNOTATION_TARGET_TYPES,
     AnnotationsMixin,
 )
-from filigree.db_base import _now_iso
 from filigree.db_entity_associations import EntityAssociationsMixin
 from filigree.db_events import EventsMixin
 from filigree.db_files import (
@@ -1423,6 +1422,80 @@ def normalize_mode(value: object) -> str:
     raise ValueError(f"Unknown mode {value!r} in config. Valid modes: {sorted(VALID_MODES)}")
 
 
+# Population tag (3.4.0 instrumentation): which kind of user a project's call log
+# describes. Stored as the ``population`` key in config.json (no schema change);
+# every ``event="call"`` log record carries it so dead-end rates can be read per
+# population.
+POPULATION_SUITE_CONSTRUCTION = "suite-construction"
+POPULATION_PRODUCT_USE = "product-use"
+VALID_POPULATIONS: tuple[str, ...] = (POPULATION_SUITE_CONSTRUCTION, POPULATION_PRODUCT_USE)
+DEFAULT_POPULATION = POPULATION_PRODUCT_USE
+
+
+def read_population(filigree_dir: Path) -> str | None:
+    """Return the project's ``population`` tag, or ``None`` when unset/invalid.
+
+    Never raises: this feeds logging, which must not break a call.
+    """
+    try:
+        value = read_config(filigree_dir).get("population")
+    except (ValueError, TypeError, OSError):
+        return None
+    return value if isinstance(value, str) and value in VALID_POPULATIONS else None
+
+
+def read_integration_ref(filigree_dir: Path) -> str:
+    """Return the configured ``integration_ref`` (default ``main``).
+
+    Stored as the ``integration_ref`` key in config.json (no schema change, Task
+    0.6): the branch a close's commit anchor is checked against as
+    ``origin/<integration_ref>``. Never raises; an absent, corrupt or non-string
+    setting yields the default. An unsafe ref name is returned as-is so the
+    reachability check reports ``unknown`` (it validates before running git)
+    rather than silently checking against the wrong branch.
+    """
+    try:
+        value = read_config(filigree_dir).get("integration_ref")
+    except (ValueError, TypeError, OSError):
+        return DEFAULT_INTEGRATION_REF
+    return value if isinstance(value, str) and value else DEFAULT_INTEGRATION_REF
+
+
+# Stage 0 telemetry cut (Task 0.5a): which ``metadata.wardline.kind`` values the
+# scan ingest accepts. Stored as ``scan_ingest.accept_kinds`` in config.json (no
+# schema change). ``*`` (``db_files.SCAN_INGEST_ACCEPT_ALL_KINDS``) accepts every
+# kind (the 3.3 behaviour); the default accepts defect-side kinds only, so engine
+# telemetry is rejected per-finding instead of landing as work. The path plays no
+# part: a defect on the ``<engine>`` pseudo-path is accepted. Advertised on
+# ``GET /api/files/_schema`` as ``accept_kinds`` so a producer can detect the guard.
+DEFAULT_SCAN_INGEST_ACCEPT_KINDS: tuple[str, ...] = ("defect",)
+
+
+def read_scan_ingest_accept_kinds(filigree_dir: Path) -> tuple[str, ...]:
+    """Return the effective ``scan_ingest.accept_kinds`` (sorted, de-duplicated).
+
+    Never raises: an absent, corrupt, or malformed setting (not a non-empty list
+    of non-empty strings) falls back to ``DEFAULT_SCAN_INGEST_ACCEPT_KINDS`` --
+    the guarded default, never the permissive one.
+    """
+    try:
+        section = read_config(filigree_dir).get("scan_ingest")
+    except (ValueError, TypeError, OSError):
+        return DEFAULT_SCAN_INGEST_ACCEPT_KINDS
+    if section is None:
+        return DEFAULT_SCAN_INGEST_ACCEPT_KINDS
+    kinds = section.get("accept_kinds") if isinstance(section, dict) else None
+    if not isinstance(kinds, list) or not kinds or not all(isinstance(k, str) and k for k in kinds):
+        logger.warning(
+            "config %s: scan_ingest.accept_kinds must be a non-empty list of strings, got %r; using %r",
+            filigree_dir / CONFIG_FILENAME,
+            section,
+            list(DEFAULT_SCAN_INGEST_ACCEPT_KINDS),
+        )
+        return DEFAULT_SCAN_INGEST_ACCEPT_KINDS
+    return tuple(sorted(set(kinds)))
+
+
 VALID_REGISTRY_BACKENDS: frozenset[RegistryBackend] = frozenset(cast("tuple[RegistryBackend, ...]", get_args(RegistryBackend)))
 
 
@@ -2410,7 +2483,6 @@ class FiligreeDB(
         # "current" — nothing to do.
 
         self._seed_templates()
-        self._seed_future_release()
         self.conn.commit()
         self._warn_if_registry_backend_hybrid_state()
 
@@ -2448,41 +2520,6 @@ class FiligreeDB(
                     "db_path": str(self.db_path),
                 },
             )
-
-    def _seed_future_release(self) -> None:
-        """Create the "Future" release singleton if it doesn't exist.
-
-        Only runs when the ``release`` pack is enabled. Uses raw SQL to
-        avoid circular validation during init. Idempotent — skips if a
-        release with ``version == "Future"`` already exists.
-        """
-        if "release" not in self.enabled_packs:
-            return
-
-        if self.templates.get_type("release") is None:
-            logger.warning("Release pack enabled but 'release' type not registered — skipping Future release seed")
-            return
-
-        # Guard json_extract with json_valid: a single corrupt fields row would
-        # otherwise raise ``OperationalError: malformed JSON`` and abort init.
-        # Migrations already tolerate corrupt fields elsewhere; the
-        # Future-singleton check must do the same.
-        existing = self.conn.execute(
-            "SELECT id FROM issues WHERE type = 'release' AND json_valid(fields) AND json_extract(fields, '$.version') = 'Future'"
-        ).fetchone()
-        if existing is not None:
-            return
-
-        initial_state = self.templates.get_initial_state("release")
-        issue_id = f"{self.prefix}-{_uuid.uuid4().hex[:10]}"
-        now = _now_iso()
-        self.conn.execute(
-            "INSERT INTO issues (id, title, status, priority, type, assignee, "
-            "created_at, updated_at, description, notes, fields) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (issue_id, "Future", initial_state, 4, "release", "", now, now, "", "", '{"version": "Future"}'),
-        )
-        logger.info("Seeded Future release singleton: %s", issue_id)
 
     def get_schema_version(self) -> int:
         """Return the current schema version from PRAGMA user_version."""

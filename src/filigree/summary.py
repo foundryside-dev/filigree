@@ -155,19 +155,21 @@ def generate_summary(db: FiligreeDB) -> str:
 
             lines.append("")
 
-    # -- Ready to Work (limit 12)
+    # -- Ready to Work (limit 12): containers dropped, startable leaves first
+    entries, _ = db.ready_for_orientation(ready)
     lines.append("## Ready to Work (no blockers, by priority)")
-    if ready:
-        for issue in ready[:12]:
+    if entries:
+        for issue, startable, next_action in entries[:12]:
             parent_ctx = ""
             if issue.parent_id and issue.parent_id in parent_titles:
                 parent_ctx = f" ({parent_titles[issue.parent_id]})"
             # Show state in parens when it differs from the default "open"
             state_info = f" ({issue.status})" if issue.status != "open" else ""
             title = _sanitize_title(issue.title)
-            lines.append(f'- P{issue.priority} {issue.id} [{issue.type}] "{title}"{state_info}{parent_ctx}')
-        if len(ready) > 12:
-            lines.append(f"  ...and {len(ready) - 12} more")
+            start_hint = "" if startable else (f" — not startable: move to '{next_action}' first" if next_action else " — not startable")
+            lines.append(f'- P{issue.priority} {issue.id} [{issue.type}] "{title}"{state_info}{parent_ctx}{start_hint}')
+        if len(entries) > 12:
+            lines.append(f"  ...and {len(entries) - 12} more")
     else:
         lines.append("- (none)")
     lines.append("")

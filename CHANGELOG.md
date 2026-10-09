@@ -7,6 +7,289 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.4.0] - 2026-10-09
+
+### Breaking
+
+Three claim-verb contracts change in this minor on purpose: they closed bypasses
+where any actor could undo, release or keep alive another agent's work (MCP F1,
+F3, and the heartbeat follow-up to F3). They
+ship without the usual one-minor deprecation; the forthcoming deprecation
+policy (ADR-030) records this as its one pre-4.0 exception.
+
+- **`admin_undo_last` requires `expected_event_id` and is holder-checked (MCP
+  F1).** Pass the `event_id` of the event to reverse, read from
+  `issue_event_list`. If it is not the newest reversible event, the call returns
+  `CONFLICT` with `details.latest_event_id` and changes nothing. A retried undo
+  can no longer walk back one more event per call. If another actor holds a
+  live claim on the issue, the call returns `CONFLICT` with `details.holder`
+  unless `override: true` (coordinator); an overriding undo records
+  `{"override": true, "holder": ...}` on its `undone` event. Nothing left to
+  reverse returns `{"result": "no_op", "reason": "no_reversible_event"}` instead
+  of `{"undone": false, ...}`. CLI: `filigree undo` / `undo-last` require
+  `--expected-event-id <n>` and gain `--override`; the no-op exits 0. Python:
+  `undo_last(issue_id, *, actor, expected_event_id, override=False)`, plus
+  `undo_candidate_event_id(issue_id)`.
+- **`work_release` is holder-checked by default; `if_held` is removed (MCP
+  F3).** `actor` must be the current holder; a claim held by anyone else
+  returns `CONFLICT` and is left alone. `expected_assignee` is only an extra
+  compare-and-swap guard (the holder must also equal it), never authorization —
+  naming the holder does not let a non-holder release. `override: true` is the
+  only coordinator bypass and is recorded as a new `released_by_override` event
+  (not undoable). Releasing an issue nobody holds
+  returns `{"result": "no_op", "reason": "not_claimed"}`, never `CONFLICT`.
+  Passing `if_held` now returns `VALIDATION` with `details` `{parameter:
+  "if_held", renamed_to: null, migration: "holder check is now the default; use
+  override:true for coordinator release"}`. CLI: `filigree release` /
+  `release-claim` drop `--if-held` and gain `--override`; the no-op exits 0.
+  HTTP (`POST /api/issue/{id}/release`, `/api/weft/issues/{id}/release`): same
+  holder check, new optional `override` body field. `if_held` is still accepted
+  but no longer changes anything. An unclaimed issue answers 200 with the
+  unchanged issue. The dashboard's Release button sends `override: true`, so
+  its releases are recorded as `released_by_override` by `dashboard`. Python:
+  `release_claim(issue_id, *, actor, expected_assignee=None, override=False,
+  reason="", revert_status=True) -> Issue | None` (`None` is the no-op).
+- **`work_heartbeat` is holder-checked; `actor` is required.** Same rule as
+  `work_release`: `actor` must be the current holder, or the call returns
+  `CONFLICT` and the lease is not extended. Before, naming the holder in
+  `expected_assignee` let any actor extend it, a blank actor skipped the check,
+  and MCP filled in a missing `actor` with the holder. So any peer could keep an
+  abandoned claim alive and hide it from `stale-claims` → `reclaim`.
+  `expected_assignee` is now only an extra compare-and-swap guard.
+  `override: true` is the coordinator bypass and is recorded as a new
+  `heartbeat_by_override` event (not undoable). MCP `work_heartbeat` returns
+  `VALIDATION` when `actor` is omitted; a holder that relied on the old default
+  must now pass `actor`. CLI: `filigree heartbeat-work` checks the global
+  `--actor` the same way and gains `--override`. There is no HTTP heartbeat
+  route. Python: `heartbeat_work(issue_id, *, actor, expected_assignee=None,
+  override=False, lease_hours=48)`.
+
+### Added
+
+- **Call-outcome logging on every surface, and a per-project population tag.**
+  MCP tool calls, dashboard HTTP requests and CLI commands each emit one
+  `event="call"` record to the JSONL log: `{surface, name, outcome, code,
+  duration_ms, population}`. `outcome` (`ok`/`error`/`no_op`/`validation`) is
+  read from the returned envelope, so error envelopes, no-op sentinels and
+  schema rejections are visible, not only raised exceptions. MCP records keep
+  the legacy `tool`/`args` fields and log the served (namespaced) tool name;
+  HTTP records use `METHOD <route template>`. New config key `population`
+  (`suite-construction` | `product-use`), set by `filigree init --population`
+  (prompted at a TTY, defaulting to `product-use` with a logged warning
+  otherwise) or `filigree config set population <value>`, shown as
+  `POPULATION:` in the session-context banner. No schema change.
+- **`GET /api/files/_schema` advertises `accept_kinds` (Stage 0).** The
+  response gains a top-level `accept_kinds: [...]` — the project's effective
+  `scan_ingest.accept_kinds` (`["defect"]` by default, `["*"]` when the 3.3
+  behaviour is restored). A producer that pre-flights this endpoint (Wardline
+  does) uses the key's presence to tell that this Filigree rejects telemetry
+  kinds and never sweeps stored telemetry rows, and so that a defects-only
+  emit is safe. The same payload is now also served at
+  `GET /api/weft/files/_schema`. Additive.
+- **`filigree finding export` archives (and optionally drops) stored telemetry
+  findings (Stage 0).** Selects every `scan_findings` row whose
+  `metadata.wardline.kind` is a known non-defect kind
+  (`fact`/`classification`/`metric`/`suggestion`), on any path and at any
+  status. A row with a missing, corrupt or unknown kind is never selected
+  (FIL-1). The `<engine>` pseudo-path is selected by kind like any other path,
+  because Wardline also emits real defects there (for example
+  `WLN-ENGINE-LINELESS-DEFECT`). A row linked to
+  an issue (`issue_id` set) is never selected. It is kept as evidence and
+  counted as `skipped_linked`. Each row is written with its
+  `file_records` row as one JSONL line, ordered by finding id, to
+  `archive/telemetry-3x.jsonl` under the project root (or `--out`), with a
+  sha256sum-format `<out>.sha256` sidecar. It refuses to overwrite an existing
+  file unless `--force` is given. Nothing is deleted by default. `--dry-run`
+  only counts and writes nothing. `--delete` runs only after the archive and
+  its sidecar have been fsynced in the same invocation. It then removes the
+  exported rows in one `BEGIN IMMEDIATE` transaction, along with any file
+  record that no finding or issue association still references. Output:
+  `{selected, exported, deleted, deleted_file_records, skipped_linked, out,
+  sha256, dry_run}`
+  (`--json`). Nothing is written to the issues or events tables. No schema
+  change.
+- **Close responses carry `warnings[]`; commit-anchor reachability check
+  (`close_commit_reachable`).** When a close cites a commit anchor
+  (`--commit` / `commit`, `branch@sha`), Filigree runs `git fetch --quiet
+  origin <integration_ref>` in the project root (10 s timeout; per process,
+  a successful fetch is reused for 60 s and a failed one for 30 s), then
+  `git merge-base --is-ancestor <sha> origin/<integration_ref>` (10 s timeout).
+  A "not reachable" result that relied on a cached fetch is checked again after
+  one fresh fetch, so a commit pushed moments ago is not blamed. A close that
+  will 404 or is already closed skips git.
+  On the MCP and HTTP surfaces this runs on a worker thread, never on the
+  event loop. On MCP it also runs before the per-project tool lock is taken,
+  so a slow fetch never holds up other MCP calls on the same project. A sha that is not an ancestor adds
+  `commit_not_reachable_from_integration_ref: <sha> not in origin/<ref>` to the
+  response's `warnings[]`. That includes a squash-merged branch sha, and, in a
+  full clone, a sha git has no object for (for example, a commit that exists
+  only in another clone). The close still goes through: the check never blocks
+  in 3.x. The verdict (`true` / `false` / `"unknown"`) is stored as a new
+  non-reversible `close_commit_checked` event and shown as
+  `close_commit_reachable` on MCP `issue_get` (`null` when the issue has no
+  close anchor). The verdict is `unknown`, with no warning, when there is no git
+  checkout at the project root, git is missing, the anchor has no 7–40 hex sha,
+  the fetch fails or times out, the clone is shallow, or the sha prefix is
+  ambiguous. New config key `integration_ref` (default `main`), settable with
+  `filigree config set integration_ref <branch>`. The sha and ref are validated
+  before they are passed to git as argv, with no shell. Inherited `GIT_DIR`,
+  `GIT_WORK_TREE` and `GIT_INDEX_FILE` are stripped, and ssh runs in batch mode
+  unless `GIT_SSH_COMMAND` is set, so a prompt cannot hang the fetch.
+  `warnings[]` appears on MCP `issue_close`, HTTP
+  `POST /api/issue/{id}/close` and `POST /api/weft/issues/{id}/close`, and on
+  each `succeeded` item of CLI `close --json` (the CLI prints `Warning: ...` to
+  stderr otherwise). It is omitted when empty. It also carries the closure
+  gate's `governance_provider_archived` warning, which until now was only an
+  event and a server log line. No schema change.
+
+### Changed
+
+- **`work_start_next` / `work_claim_next` are retry-safe (MCP F4).** A retried
+  call no longer claims a second issue and strands the first for the 48 h
+  lease. If the assignee claimed an issue within the last 60 seconds and still
+  holds it in progress (`work_claim_next`: any live claim), that issue is
+  returned with `already_holding: true` and nothing is written. Both tools
+  accept an optional `client_request_id`. A retry with the same id returns the
+  issue that request claimed, at any age, if the assignee still holds it. An
+  older held claim does not block new work: the call claims the next ready
+  issue, as before. Known limitation: sessions that share one actor (the
+  default when the SessionStart hook carries a fixed `--actor`) are told apart
+  only by this 60-second retry window until per-session keying lands. A second
+  session that calls within 60 seconds of the first session's claim is handed
+  that claim. The id is stored on the `claimed` event's comment
+  (no schema change). Every success response now carries `already_holding`.
+  The CLI `claim-next` / `start-next-work` follow the same rule and print
+  `Already holding …`. A new table-driven call-twice harness
+  (`tests/mcp/test_call_twice.py`) pins the second-call outcome class of the
+  core-loop verbs. The `filigree-workflow` skill's Stale Claims recipe now uses
+  `stale-claims` → `reclaim` instead of releasing a peer's claim (LX-05). No
+  schema change.
+- **Archived Legis can no longer wedge a close (M-7, HTTP F1).** The closure
+  gate used to call Legis synchronously (urllib, 5 s timeout) from inside async
+  handlers and fail closed when it was unreachable, so a single set `LEGIS_URL`
+  pointing at a retired Legis blocked every governed close and stalled the event
+  loop on each one. Legis is archived, so the gate no longer consults it: with
+  `LEGIS_URL` set, a governed close or closing transition now PROCEEDs with a
+  `governance_provider_archived` warning on the `GateDecision` and a
+  `governance_warning` event on the issue, and makes **no network call**.
+  Unchanged: governance stays off when `LEGIS_URL` is unset, and the local
+  checks still fail closed as `STALE` (a drifted sign-off snapshot, and the
+  Loomweave current-code drift check on signed bindings). Removed the
+  `legis_known_down` parameter of `evaluate_closure_gate`, since there is no
+  Legis probe left for it to short-circuit. Removed the Legis closure-gate text
+  from the `filigree-workflow` skill's `error-codes.md`. The Legis client
+  module stays until 4.0. No schema change.
+- **The session banner and READY list no longer overstate available work.**
+  `READY TO WORK (n startable of m ready)` now drops container types (release,
+  epic, milestone, phase) entirely, lists startable leaves first (so
+  `READY_CAP` is not spent on items `start-work` would reject), and marks the
+  rest `— not startable: move to '<next>' first`; the `context.md` summary's
+  "Ready to Work" section follows the same rule. In-progress work is split by
+  actor: `YOUR CLAIMS (actor=<a>)` lists only that actor's items with lease
+  remaining and `OTHERS ACTIVE: n` is a bare count; with no actor known
+  (`--actor` / `FILIGREE_ACTOR`) only `IN PROGRESS (n, actor unknown — pass
+  --actor)` is printed. The critical-path heading gains `(stalled Nd)` when its
+  head item has not been updated for more than 14 days. The `ANALYZER FINDINGS
+  … actionable` line is replaced by `ANALYZER SIGNAL: d defect-signal
+  finding(s) open`, with telemetry rows counted separately as `(+t telemetry
+  rows, not work)` (omitted when 0) and hints pointing at `finding list --kind
+  defect --status open` (MCP hint adds `suppression=active` so it agrees with
+  the count). Known gap: the count includes kind-less rows that the strict
+  `kind=defect` hint filter omits. `session-context` now accepts the global
+  `--actor` (or `FILIGREE_ACTOR`). No schema change.
+- **`POST /api/weft/scan-results` reports per-finding outcomes (HTTP F2).**
+  `failed[]` is now populated: each entry is `{index, fingerprint, code,
+  reason}` (`index` is the finding's position in the request array,
+  `fingerprint` is `null` when the finding carried none). Today a finding
+  dropped by the registry's per-path body cap is reported as `OVER_CAP`; before,
+  it appeared only as free text in `warnings[]` under HTTP 200. The code
+  vocabulary is open (documented: `OVER_CAP`, `VALIDATION`, `SCHEME_MISMATCH`,
+  `KIND_NOT_ACCEPTED`; see the Stage 0 entry below) and `VALIDATION` / `SCHEME_MISMATCH` are reserved:
+  a malformed finding still rejects the whole batch with HTTP 400, and a scheme
+  mismatch is still carried batch-level by `weft_reasons`. A replayed batch now
+  lists findings it matched to an identical stored row under a new additive
+  `unchanged: [{id, reason: "already_present"}]` instead of a bare
+  `succeeded: []`; `succeeded` remains the newly-created ids. `stats` gains
+  `requested` (findings in the request) and `applied` (created + updated).
+  `warnings[]` stays operator text. Additive on the wire: a consumer must treat
+  an unknown code as a generic rejection. Wardline (with its matching Stage 0
+  fix) reads `code`, maps an unknown one to `rejected`, and keeps
+  `"<code>: <reason>"` as the failure detail. The frozen classic `POST /api/v1/scan-results`
+  envelope is unchanged. No schema change.
+- **Scan ingest accepts defect findings only by default; the sweep never
+  flips telemetry (Stage 0).** A finding whose `metadata.wardline.kind` is a
+  telemetry kind (`fact`, `classification`, `metric`, `suggestion`) is no
+  longer stored as a finding, on any path. The path plays no part: a defect on
+  Wardline's `<engine>` pseudo-path (for example `WLN-ENGINE-LINELESS-DEFECT`,
+  which wraps a code defect whose line is unknown) is still accepted.
+  It is rejected per-finding in `failed[]` with `code: "KIND_NOT_ACCEPTED"`
+  (reason `telemetry kinds are not work; see Stage 0`) and counted in the new
+  `stats.rejected_by_kind`; the rest of the batch is ingested and the call
+  still returns 200. A finding with no kind, a malformed kind or an unknown
+  kind is treated as a defect and accepted. Independently of the setting, the
+  `mark_unseen` sweep never moves a stored telemetry row to
+  `unseen_in_latest`, and the clean-stale ageing (`filigree finding
+  clean-stale`, `POST /api/weft/findings/clean-stale`) never moves one from
+  `unseen_in_latest` to `fixed`. So a producer that stops emitting telemetry
+  does not close previously stored telemetry rows (or their linked issues) as
+  fixed, and telemetry rows a 3.3 sweep already left in `unseen_in_latest`
+  stay there. Rows with missing, corrupt or `{}` metadata are still swept and
+  aged as before. Telemetry
+  rows that are already stored are left as they are. To restore the 3.3
+  behaviour (store every kind), set
+  `"scan_ingest": {"accept_kinds": ["*"]}` in `.weft/filigree/config.json`; a
+  list such as `["defect", "fact"]` accepts just those kinds. A malformed
+  setting falls back to `["defect"]`. `finding_report` (MCP/CLI) now returns a
+  `VALIDATION` error for a telemetry-kind finding instead of a misleading
+  "not found after ingestion". The classic `POST /api/v1/scan-results`
+  envelope applies the same policy but does not gain the new keys. No schema
+  change.
+- **Agent-facing prose matches behaviour; the SessionStart hook carries your
+  actor (LX-11, LX-14, LX-16).** The managed `CLAUDE.md` / `AGENTS.md` block
+  now says how to name yourself (`filigree --actor <name>`, MCP `actor=<name>`,
+  `FILIGREE_ACTOR` for `session-context`). The skill, MCP prompt, tool
+  descriptions and `docs/agent-integration.md` / `docs/mcp.md` no longer point
+  at the pre-3.0 `.filigree/` store, frame themselves as "filigree 2.0", name
+  archived Warpline as a live tool (the `commit` parameter on `work_start` /
+  `work_claim` drops its "(warpline seam)" jargon), or document a
+  `current_assignee` CONFLICT detail (the live shape is
+  `{issue_id, observed, expected}`) and a CLI exit code 4: every error
+  envelope exits 1, so branch on `code`. `docs/agent-integration.md`'s exit-code
+  table is rewritten to match. The prose guards gain these stale claims as
+  forbidden literals. `filigree install --actor <id>` (either position; else
+  `FILIGREE_ACTOR`) writes the hook as `filigree --actor <id> session-context`
+  so the session banner lists your own claims; re-install replaces the hook
+  rather than duplicating it, and `doctor --fix` keeps an actor already
+  recorded. The banner's telemetry note now points at `filigree finding
+  export`. No schema change.
+
+### Removed
+
+- **`filigree init` no longer seeds a "Future" release.** The seeded release
+  showed up as ready work in every new tracker. Existing trackers keep theirs;
+  `filigree doctor` now reports a childless, link-free `Future` release and
+  `doctor --fix` deletes it. A `Future` release with children or dependencies
+  is left alone, and a release the user creates themselves is unaffected.
+
+### Fixed
+
+- **Sibling tools no longer get HTTP 401 when the daemon runs on an env
+  token.** Wardline and Loomweave authenticate with the token they read from
+  `<store>/federation_token`. A daemon started with `WEFT_FEDERATION_TOKEN`
+  enforced that value even when the file held a different, stale one, so every
+  sibling that sent the file token was rejected. At daemon boot (both
+  single-project and server mode) the file is now rewritten to the active env
+  token, atomically and `0600`, and a `token_file_reconciled` log record is
+  written with token fingerprints, never values. The rewrite only goes from
+  env to file: a server-mode file token is still never promoted to a
+  cross-project env pin. `/api/health` `auth` gains three keys alongside the
+  existing ones: `mode` (`bearer`/`off`), `source` (`env`/`file`/`none`) and
+  `file_matches_active`, which is read on every request. `filigree doctor`
+  reports when the file that boot would rewrite (the project store, or the
+  server config dir in server mode) differs from the shell's env token
+  (`federation_token_file_mismatch`, check id `federation.token_file`), and
+  `doctor --fix` rewrites it. (HTTP F14, M-6)
+
 ## [3.3.0] - 2026-09-02
 
 ### Added

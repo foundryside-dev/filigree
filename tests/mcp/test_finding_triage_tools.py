@@ -24,6 +24,7 @@ from filigree.registry import (
 )
 from filigree.types.api import ErrorCode
 from filigree.types.core import make_entity_id, make_issue_id
+from tests._db_factory import set_scan_ingest_accept_kinds
 from tests._fakes.registry import FixedRegistry
 from tests.mcp._helpers import _parse
 
@@ -93,7 +94,12 @@ class TestListFindingsTool:
 
 
 def _seed_wardline_mix(db: FiligreeDB) -> None:
-    """Metric noise + a real defect + a baselined defect (FIL-2/X-5 shape)."""
+    """Metric noise + a real defect + a baselined defect (FIL-2/X-5 shape).
+
+    Telemetry rows here model a pre-Stage-0 ingest, so the seed opts back in to
+    every kind (``accept_kinds=["*"]``).
+    """
+    set_scan_ingest_accept_kinds(db, ["*"])
     db.register_file("src/app.py", language="python")
     db.process_scan_results(
         scan_source="wardline",

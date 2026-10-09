@@ -210,6 +210,35 @@ class WeftReason(TypedDict):
     fix: str
 
 
+class ScanFindingFailure(TypedDict):
+    """One finding the ingest refused to apply, reported per-finding (HTTP F2).
+
+    ``index`` is the finding's position in the REQUEST ``findings`` array (not
+    among the survivors) so a producer can map the failure back to its input.
+    ``fingerprint`` is the finding's scanner-supplied fingerprint, or ``None``
+    when it carried none. ``code`` is an OPEN vocabulary: the documented members
+    are ``OVER_CAP`` (dropped by the registry's per-path body cap),
+    ``VALIDATION`` (malformed finding), ``SCHEME_MISMATCH`` (fingerprint scheme
+    differs from the store's) and ``KIND_NOT_ACCEPTED`` (a wardline finding kind
+    the project's ``scan_ingest.accept_kinds`` does not accept, on any path --
+    Stage 0).
+    Consumers must treat unknown codes as a generic rejection. ``reason`` is
+    human-readable operator text.
+    """
+
+    index: int
+    fingerprint: str | None
+    code: str
+    reason: str
+
+
+class ScanUnchangedFinding(TypedDict):
+    """A finding the ingest matched to an already-stored, identical row (a replay)."""
+
+    id: str
+    reason: str
+
+
 class ScanIngestResult(TypedDict):
     """Shape returned by ``process_scan_results()``."""
 
@@ -227,6 +256,22 @@ class ScanIngestResult(TypedDict):
     #: scan_source, so the ``mark_unseen`` sweep was REFUSED to avoid silently
     #: cascade-closing prior-scheme findings as fixed (Weft seam G4).
     weft_reasons: list[WeftReason]
+    #: Findings the ingest dropped, with a stable ``code`` per entry (HTTP F2).
+    #: ``warnings`` keeps the operator text; this is the machine-readable list.
+    failed: list[ScanFindingFailure]
+    #: Existing findings (same scan_source + identity) whose stored content is
+    #: identical to what was submitted -- a replayed batch. These are NOT in
+    #: ``new_finding_ids``; without this list a replay was indistinguishable
+    #: from a batch that landed nothing.
+    unchanged: list[ScanUnchangedFinding]
+    #: ``len(findings)`` in the request.
+    requested: int
+    #: ``findings_created + findings_updated`` -- findings the ingest applied.
+    applied: int
+    #: Findings rejected with ``KIND_NOT_ACCEPTED`` (Stage 0): their wardline
+    #: kind is not in ``scan_ingest.accept_kinds`` (the path plays no part).
+    #: Each is also itemised in ``failed``.
+    rejected_by_kind: int
 
 
 class EnrichedFileItem(FileRecordDict):

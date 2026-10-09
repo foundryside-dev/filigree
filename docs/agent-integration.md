@@ -84,8 +84,8 @@ filigree --actor agent-1 start-next-work --assignee agent-1
 
 # Agent 2 tries the same issue — fails
 filigree --actor agent-2 start-work proj-a3f9b2e1c0 --assignee agent-2
-# Returns: {"error": "...", "code": "CONFLICT", "details": {"current_assignee": "agent-1"}}
-# Exit code 4
+# Returns: {"error": "...", "code": "CONFLICT", "details": {"issue_id": "proj-a3f9b2e1c0", "observed": "agent-1", "expected": "agent-2"}}
+# Exit status 1 (every error envelope exits 1 — branch on "code")
 ```
 
 Via MCP:
@@ -94,8 +94,8 @@ Via MCP:
 work_start(issue_id="...", assignee="agent-1")            # Claim + transition atomically
 work_start_next(assignee="agent-1", priority_max=1)       # Highest-priority ready, with filters
 work_claim(issue_id="...", assignee="agent-2")           # Niche: reserve without transitioning
-work_release(issue_id="...")                             # Clear assignee without changing status
-work_release(issue_id="...", actor="agent-1", if_held=True)  # Unassigned no-op; held-by-other returns CONFLICT
+work_release(issue_id="...", actor="agent-1")            # Clear assignee; wip reverts to open (revert_status=false keeps status)
+                                                         # Holder-checked; unassigned is a no-op; held-by-other returns CONFLICT
 work_heartbeat(issue_id="...", actor="agent-1")           # Refresh claim liveness
 work_stale_list(stale_after_hours=48, expires_within_hours=2)  # Find abandoned, expired, or soon-expiring claims
 work_reclaim(issue_id="...", assignee="agent-2", expected_assignee="agent-1", reason="missed heartbeat")
@@ -148,7 +148,7 @@ filigree changes --since 2026-02-14T10:00   # Global event stream
 
 ## Pre-Computed Context
 
-Filigree generates a `context.md` file on every mutation, stored at `.weft/filigree/context.md` (legacy installs that have not yet migrated store it at `.filigree/context.md`). This file contains:
+Filigree generates a `context.md` file on every mutation, stored in the project's store dir (`.weft/filigree/context.md` by default; `filigree doctor --verbose` names the store in use). This file contains:
 
 - Project vitals (prefix, enabled packs, issue counts)
 - Ready work queue (unblocked, sorted by priority)
@@ -159,15 +159,14 @@ Agents read this via the `filigree://context` MCP resource or `summary_get` tool
 
 ## Exit Codes (CLI)
 
-Standardised since 2.0 (unchanged in 3.0.0) so automated callers can branch on retryability:
+The exit status says only *whether* a verb failed. Branch on the envelope's `code` (with `--json`) to decide *what* to do — `CONFLICT` is safe to retry against different work; most other codes need a changed request or an operator:
 
 | Code | Meaning |
 |---|---|
 | 0 | success (including empty results) |
-| 1 | operational error (`PERMISSION`, `INVALID_TRANSITION`, `IO`, `NOT_FOUND`, `INVALID_API_URL`, `STOP_FAILED`) |
-| 2 | usage / validation error (`VALIDATION`) |
-| 3 | not initialized / schema mismatch (`NOT_INITIALIZED`, `SCHEMA_MISMATCH`) |
-| 4 | contention / conflict (`CONFLICT`) — safe to retry |
+| 1 | any error envelope from a verb — `CONFLICT`, `VALIDATION`, `NOT_FOUND`, `INVALID_TRANSITION`, `NOT_INITIALIZED`, `SCHEMA_MISMATCH`, `IO`, … |
+| 2 | click usage error (unknown option, missing argument) |
+| 3 | forward schema mismatch reported by `filigree init`, `filigree doctor`, `filigree sei-backfill`, or dashboard/server startup |
 
 ## Example: Multi-Agent Setup
 

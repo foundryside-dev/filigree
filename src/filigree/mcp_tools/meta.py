@@ -36,8 +36,10 @@ from filigree.types.api import (
     JsonlTransferResponse,
     LabelActionResponse,
     PublicIssue,
+    UndoConflictError,
     claim_conflict_envelope,
     parse_response_detail,
+    undo_conflict_envelope,
 )
 from filigree.types.events import EventType
 from filigree.types.inputs import (
@@ -426,14 +428,33 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
         ),
         Tool(
             name="undo_last",
-            description="Undo the most recent reversible action on an issue. Covers status, title, priority, assignee, description, notes, claims, and dependency changes. Success returns the flat updated PublicIssue plus undo metadata.",
+            description=(
+                "Undo the most recent reversible action on an issue. Covers status, title, priority, assignee, "
+                "description, notes, claims, and dependency changes. expected_event_id is required: the event_id "
+                "of the event to reverse, read from issue_event_list. If it is not the newest reversible event the "
+                "call returns CONFLICT with details.latest_event_id and changes nothing, so a retried undo never "
+                "reverses a second event. If another actor holds a live claim on the issue the call returns "
+                "CONFLICT with details.holder unless override=true (coordinator). Nothing left to reverse returns "
+                '{"result": "no_op", "reason": "no_reversible_event"}. Success returns the flat updated '
+                "PublicIssue plus undo metadata."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "issue_id": {"type": "string", "description": "Issue ID"},
+                    "expected_event_id": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "event_id (from issue_event_list) of the event to reverse; must be the newest reversible one.",
+                    },
+                    "override": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Coordinator undo on an issue whose live claim is held by another actor. Recorded on the undone event.",
+                    },
                     "actor": {"type": "string", "description": "Agent/user identity for audit trail"},
                 },
-                "required": ["issue_id"],
+                "required": ["issue_id", "expected_event_id"],
             },
         ),
         Tool(
@@ -484,7 +505,8 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
             name="list_reconciliation_debt",
             description=(
                 "List issues carrying reconciliation debt — governed finding→issue auto-closes that the "
-                "Legis closure gate deferred (blocked, or could not confirm). Each row is one issue with "
+                "closure gate deferred (a bound entity's content drifted since it was attached or signed) or "
+                "that failed. Each row is one issue with "
                 "its debt_count and latest debt timestamp. Use to find and action deferred cascade closes."
             ),
             inputSchema={
@@ -889,10 +911,10 @@ async def _handle_get_summary(arguments: dict[str, Any]) -> list[TextContent]:
 
 
 async def _handle_session_context(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.hooks import _build_context
+    from filigree.hooks import _build_context, resolve_session_actor
 
     tracker = get_db()
-    return _text(_build_context(tracker, resolve_request_filigree_dir(tracker)))
+    return _text(_build_context(tracker, resolve_request_filigree_dir(tracker), resolve_session_actor()))
 
 
 async def _handle_get_stats(arguments: dict[str, Any]) -> list[TextContent]:
@@ -1026,14 +1048,21 @@ async def _handle_undo_last(arguments: dict[str, Any]) -> list[TextContent]:
     actor, actor_err = _validate_actor(args.get("actor", "mcp"))
     if actor_err:
         return actor_err
+    override = args.get("override", False)
+    if not isinstance(override, bool):
+        return _text(ErrorResponse(error="override must be a boolean", code=ErrorCode.VALIDATION))
     tracker = get_db()
     try:
-        result = tracker.undo_last(args["issue_id"], actor=actor)
-        if result["undone"]:
-            refresh_summary()
-        return _text(undo_result_to_mcp(result))
+        result = tracker.undo_last(args["issue_id"], actor=actor, expected_event_id=args["expected_event_id"], override=override)
     except KeyError:
         return _text(ErrorResponse(error=f"Issue not found: {args['issue_id']}", code=ErrorCode.NOT_FOUND))
+    except UndoConflictError as e:
+        return _text(undo_conflict_envelope(e))
+    except ValueError as e:
+        return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
+    if result.get("undone") is True:
+        refresh_summary()
+    return _text(undo_result_to_mcp(result))
 
 
 async def _handle_get_issue_events(arguments: dict[str, Any]) -> list[TextContent]:

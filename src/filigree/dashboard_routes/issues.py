@@ -13,6 +13,7 @@ paths at the ``sqlite3.Connection`` level.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING, Any, overload
 
@@ -23,6 +24,7 @@ if TYPE_CHECKING:
     from fastapi.responses import JSONResponse
 
 from filigree import governance
+from filigree.commit_reachability import ReachabilityCheck
 from filigree.core import FiligreeDB, WrongProjectError
 from filigree.dashboard_routes.common import (
     _MAX_PAGINATION_OFFSET,
@@ -74,6 +76,21 @@ def _issue_write_error_details(exc: BaseException) -> dict[str, Any] | None:
     if isinstance(exc, ClaimConflictError):
         return claim_conflict_details(exc)
     return _invalid_transition_details(exc)
+
+
+async def _check_close_commit_off_loop(db: FiligreeDB, issue_id: str, commit: str | None) -> ReachabilityCheck | None:
+    """Run the close-anchor reachability check (Task 0.6) on a worker thread.
+
+    The check shells out to git (fetch + merge-base, up to ~10 s each), so it
+    must not run on the event loop. It reads only ``config.json`` and runs git;
+    it touches no ``sqlite3.Connection``, so the CONNECTION INVARIANT above is
+    unaffected. Callers await it before the close's DB work, so that work still
+    runs to completion without an ``await`` in the middle. A close that will
+    404 or refuse as already closed skips git (a cheap read, no transaction).
+    """
+    if commit is None or not db.close_commit_check_applies(issue_id):
+        return None
+    return await asyncio.to_thread(db.check_close_commit, commit)
 
 
 def _closure_gate_block(decision: governance.GateDecision) -> JSONResponse:
@@ -338,17 +355,26 @@ def _parse_batch_close_body(body: dict[str, Any], *, request: Request | None = N
 
 
 def _parse_release_claim_body(body: dict[str, Any]) -> dict[str, Any] | JSONResponse:
-    """Validate optional release-claim body fields shared by classic and weft."""
+    """Validate optional release-claim body fields shared by classic and weft.
+
+    Release is holder-checked by default (Task 0.4): ``override: true`` is the
+    coordinator path. ``if_held`` is still accepted (and type-checked) so the
+    frozen weft request shape stays valid, but it no longer changes anything —
+    holder-checked, unassigned-is-a-no-op release is now the only behaviour.
+    """
     if_held = body.get("if_held", False)
     if not isinstance(if_held, bool):
         return _error_response("if_held must be a boolean", ErrorCode.VALIDATION, 400)
+    override = body.get("override", False)
+    if not isinstance(override, bool):
+        return _error_response("override must be a boolean", ErrorCode.VALIDATION, 400)
     expected_assignee = body.get("expected_assignee")
     if expected_assignee is not None and not isinstance(expected_assignee, str):
         return _error_response("expected_assignee must be a string", ErrorCode.VALIDATION, 400)
     reason = _validate_body_string_field(body, "reason", default="")
     if not isinstance(reason, str):
         return reason
-    return {"if_held": if_held, "expected_assignee": expected_assignee, "reason": reason}
+    return {"override": override, "expected_assignee": expected_assignee, "reason": reason}
 
 
 # ---------------------------------------------------------------------------
@@ -619,6 +645,9 @@ def create_classic_router() -> APIRouter:
         if commit is not None and not isinstance(commit, str):
             return _error_response("commit must be a string", ErrorCode.VALIDATION, 400)
         fields = body.get("fields")
+        # Task 0.6: git reachability check off the event loop, before the close's
+        # DB work (see _check_close_commit_off_loop).
+        commit_check = await _check_close_commit_off_loop(db, issue_id, commit)
         try:
             gate = governance.evaluate_closure_gate(db, issue_id)
             if not gate.allowed:
@@ -632,6 +661,7 @@ def create_classic_router() -> APIRouter:
                 fields=fields,
                 expected_assignee=expected_assignee,
                 commit=commit,
+                _close_commit_check=commit_check,
             )
         except KeyError:
             return _error_response(f"Issue not found: {issue_id}", ErrorCode.NOT_FOUND, 404)
@@ -645,6 +675,10 @@ def create_classic_router() -> APIRouter:
         result: dict[str, Any] = dict(issue.to_dict())
         if annotation_warnings:
             result["annotation_warnings"] = annotation_warnings
+        # Task 0.6: advisory warnings (closure gate + commit reachability), omitted when empty.
+        close_warnings = [*gate.warnings, *issue.close_warnings]
+        if close_warnings:
+            result["warnings"] = close_warnings
         return JSONResponse(result)
 
     @router.post("/issue/{issue_id}/reopen")
@@ -926,7 +960,9 @@ def create_classic_router() -> APIRouter:
         if isinstance(release_options, JSONResponse):
             return release_options
         try:
-            issue = db.release_claim(issue_id, actor=actor, **release_options)
+            released = db.release_claim(issue_id, actor=actor, **release_options)
+            # None: nobody held it — idempotent; answer with the unchanged issue.
+            issue = released if released is not None else db.get_issue(issue_id)
         except KeyError:
             return _error_response(f"Issue not found: {issue_id}", ErrorCode.NOT_FOUND, 404)
         except WrongProjectError as e:
@@ -1471,6 +1507,9 @@ def create_weft_router() -> APIRouter:
         if commit is not None and not isinstance(commit, str):
             return _error_response("commit must be a string", ErrorCode.VALIDATION, 400)
         fields = body.get("fields")
+        # Task 0.6: git reachability check off the event loop, before the close's
+        # DB work (see _check_close_commit_off_loop).
+        commit_check = await _check_close_commit_off_loop(db, issue_id, commit)
         ready_before = {i.id for i in db.get_ready()}
         try:
             gate = governance.evaluate_closure_gate(db, issue_id)
@@ -1485,6 +1524,7 @@ def create_weft_router() -> APIRouter:
                 fields=fields,
                 expected_assignee=expected_assignee,
                 commit=commit,
+                _close_commit_check=commit_check,
             )
         except KeyError:
             return _error_response(f"Issue not found: {issue_id}", ErrorCode.NOT_FOUND, 404)
@@ -1500,6 +1540,10 @@ def create_weft_router() -> APIRouter:
         result: dict[str, Any] = dict(issue_to_weft(issue))
         if annotation_warnings:
             result["annotation_warnings"] = annotation_warnings
+        # Task 0.6: advisory warnings (closure gate + commit reachability), omitted when empty.
+        close_warnings = [*gate.warnings, *issue.close_warnings]
+        if close_warnings:
+            result["warnings"] = close_warnings
         if newly_unblocked:
             result["newly_unblocked"] = [slim_issue_to_weft(i) for i in newly_unblocked]
         return JSONResponse(result)
@@ -1567,7 +1611,9 @@ def create_weft_router() -> APIRouter:
         if isinstance(release_options, JSONResponse):
             return release_options
         try:
-            issue = db.release_claim(issue_id, actor=actor, **release_options)
+            released = db.release_claim(issue_id, actor=actor, **release_options)
+            # None: nobody held it — idempotent; answer with the unchanged issue.
+            issue = released if released is not None else db.get_issue(issue_id)
         except KeyError:
             return _error_response(f"Issue not found: {issue_id}", ErrorCode.NOT_FOUND, 404)
         except WrongProjectError as e:

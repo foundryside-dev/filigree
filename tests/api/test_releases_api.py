@@ -27,7 +27,7 @@ class TestGetReleasesEndpoint:
 
         resp = await release_client.get("/api/releases")
         data = resp.json()
-        assert len(data["releases"]) == 2  # Active Release + auto-seeded Future (Done excluded)
+        assert len(data["releases"]) == 1  # Active Release (Done excluded)
 
     async def test_include_released_shows_all(self, release_client: AsyncClient, release_dashboard_db: FiligreeDB) -> None:
         db = release_dashboard_db
@@ -39,7 +39,7 @@ class TestGetReleasesEndpoint:
 
         resp = await release_client.get("/api/releases?include_released=true")
         data = resp.json()
-        assert len(data["releases"]) == 3  # Active + Done + auto-seeded Future
+        assert len(data["releases"]) == 2  # Active + Done
 
     async def test_include_released_false_is_default(self, release_client: AsyncClient, release_dashboard_db: FiligreeDB) -> None:
         db = release_dashboard_db
@@ -64,7 +64,7 @@ class TestGetReleasesEndpoint:
 
         resp = await release_client.get("/api/releases")
         data = resp.json()
-        assert len(data["releases"]) == 2  # R1 + auto-seeded Future
+        assert len(data["releases"]) == 1  # R1
         entry = next(r for r in data["releases"] if r["id"] == release.id)
         for key in ("id", "title", "status", "progress", "child_summary", "blocks", "blocked_by"):
             assert key in entry, f"Missing key: {key}"
@@ -95,35 +95,35 @@ class TestGetReleasesEndpoint:
         assert "title" in entry_r1["blocks"][0]
 
     async def test_empty_releases(self, release_client: AsyncClient, release_dashboard_db: FiligreeDB) -> None:
-        """With no manually created releases, only the auto-seeded Future release exists."""
+        """With no manually created releases, the list is empty (init seeds no Future release)."""
         resp = await release_client.get("/api/releases")
-        releases = resp.json()["releases"]
-        assert len(releases) == 1
-        assert releases[0]["title"] == "Future"
+        assert resp.json()["releases"] == []
 
     async def test_sort_order_by_semver(self, release_client: AsyncClient, release_dashboard_db: FiligreeDB) -> None:
         db = release_dashboard_db
         r2 = db.create_issue("v2.0.0", type="release", fields={"version": "v2.0.0"})
         r1 = db.create_issue("v1.0.0", type="release", fields={"version": "v1.0.0"})
         r15 = db.create_issue("v1.5.0", type="release", fields={"version": "v1.5.0"})
+        db.create_issue("Future", type="release", fields={"version": "Future"})
 
         resp = await release_client.get("/api/releases")
         releases = resp.json()["releases"]
         ids = [r["id"] for r in releases]
-        # Semver ascending, auto-seeded Future release always sorts last
+        # Semver ascending, the Future release always sorts last
         assert len(releases) == 4
         assert ids[:3] == [r1.id, r15.id, r2.id]
         assert releases[-1]["title"] == "Future"
 
     async def test_sort_order_future_always_last(self, release_client: AsyncClient, release_dashboard_db: FiligreeDB) -> None:
         db = release_dashboard_db
-        # Auto-seeded Future release already exists; create another + a versioned release
+        # Two Future releases (one by version field, one by title) + a versioned release
+        db.create_issue("Future", type="release", fields={"version": "Future"})
         db.create_issue("Future", type="release")
         r1 = db.create_issue("v1.0.0", type="release", fields={"version": "v1.0.0"})
 
         resp = await release_client.get("/api/releases")
         releases = resp.json()["releases"]
-        # v1.0.0 sorts first; both Future releases (auto-seeded + manual) sort after it
+        # v1.0.0 sorts first; both Future releases sort after it
         assert len(releases) == 3
         assert releases[0]["id"] == r1.id
         assert all(r["title"] == "Future" for r in releases[1:])

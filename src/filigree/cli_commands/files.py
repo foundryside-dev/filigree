@@ -18,7 +18,7 @@ import tempfile
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 
 import click
 
@@ -31,6 +31,7 @@ from filigree.core import (
     VALID_WARDLINE_FINDING_KINDS,
     find_filigree_anchor,
 )
+from filigree.finding_export import DEFAULT_EXPORT_RELPATH, ExportTargetExistsError, run_finding_export
 from filigree.issue_payloads import issue_to_public
 from filigree.mcp_tools.payloads import (
     file_assoc_to_mcp,
@@ -1378,6 +1379,77 @@ def batch_update_findings_cmd(
             sys.exit(1)
 
 
+@click.command("export")
+@click.option(
+    "--kind",
+    "kind",
+    default="non-defect",
+    show_default=True,
+    type=click.Choice(["non-defect"]),
+    help="Which stored findings to export: non-defect wardline kinds, on any path",
+)
+@click.option(
+    "--out",
+    "out",
+    default=None,
+    type=click.Path(dir_okay=False, path_type=Path),
+    help="Archive path (default: archive/telemetry-3x.jsonl under the project root)",
+)
+@click.option("--delete", "delete", is_flag=True, help="After the export is written and fsynced, delete the exported rows")
+@click.option("--dry-run", "dry_run", is_flag=True, help="Count the rows that would be exported; write nothing")
+@click.option("--force", is_flag=True, help="Overwrite an existing archive file")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+def export_findings_cmd(kind: str, out: Path | None, delete: bool, dry_run: bool, force: bool, as_json: bool) -> None:
+    """Export (and optionally drop) stored non-defect findings.
+
+    Writes every scan finding whose wardline kind is a known non-defect kind
+    (fact/classification/metric/suggestion), on any path, to JSONL with its
+    file record, plus a sha256sum-format ``<out>.sha256`` sidecar. Deletes
+    nothing unless --delete is passed. A finding with a missing, corrupt, or
+    unknown kind is never selected (on every path, the <engine> pseudo-path
+    included, which also carries real defects); a finding linked to an issue
+    is never selected and is counted as skipped_linked.
+    """
+    del kind  # single-valued today; the option documents the selection
+    if dry_run and delete:
+        raise click.UsageError("--dry-run and --delete are mutually exclusive")
+    with get_db() as db:
+        if out is None:
+            base = db.project_root if db.project_root is not None else find_filigree_anchor().project_root
+            out = base / DEFAULT_EXPORT_RELPATH
+        out = out.resolve()
+        try:
+            result = run_finding_export(db, out, delete=delete, force=force, dry_run=dry_run)
+        except ExportTargetExistsError as e:
+            _emit_export_error(str(e), ErrorCode.CONFLICT, as_json=as_json)
+        except (OSError, sqlite3.Error) as e:
+            _emit_export_error(f"Export failed; nothing was deleted: {e}", ErrorCode.IO, as_json=as_json)
+
+    if as_json:
+        click.echo(json_mod.dumps(result))
+        return
+    linked_note = f"{result['skipped_linked']} issue-linked telemetry finding(s) kept (never exported or deleted)"
+    if dry_run:
+        click.echo(f"Would export {result['selected']} non-defect finding(s) to {result['out']} (dry run: nothing written)")
+        click.echo(linked_note)
+        return
+    click.echo(f"Exported {result['exported']} non-defect finding(s) to {result['out']}")
+    click.echo(f"sha256 {result['sha256']}  (sidecar {result['out']}.sha256)")
+    if delete:
+        click.echo(f"Deleted {result['deleted']} finding(s) and {result['deleted_file_records']} unreferenced file record(s)")
+    else:
+        click.echo("Nothing deleted (pass --delete to drop the exported rows)")
+    click.echo(linked_note)
+
+
+def _emit_export_error(msg: str, code: ErrorCode, *, as_json: bool) -> NoReturn:
+    if as_json:
+        click.echo(json_mod.dumps({"error": msg, "code": code}))
+    else:
+        click.echo(f"Error: {msg}", err=True)
+    sys.exit(1)
+
+
 # ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
@@ -1432,6 +1504,7 @@ def register(cli: click.Group) -> None:
     finding_group.add_command(promote_finding_cmd, "promote")
     finding_group.add_command(update_finding_cmd, "update")
     finding_group.add_command(batch_update_findings_cmd, "batch-update")
+    finding_group.add_command(export_findings_cmd, "export")
     cli.add_command(finding_group)
 
     # Hidden flat back-compat aliases (clones; shared object stays visible in group).

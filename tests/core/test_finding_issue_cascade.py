@@ -18,9 +18,8 @@ import logging
 
 import pytest
 
-from filigree import governance
 from filigree.core import FiligreeDB
-from filigree.legis_client import LegisGateResult, LegisGateStatus
+from tests._fakes.legis_retired import ARCHIVED_WARNING, governance_on
 
 
 def _wln(path: str, fingerprint: str, **extra: object) -> dict[str, object]:
@@ -103,16 +102,26 @@ def _debt_count(db: FiligreeDB, issue_id: str) -> int:
     ).fetchone()["n"]
 
 
-class TestGatedCascadeClose:
-    """Task 2 (Design A): the finding→issue auto-close consults the Legis gate
-    for governed issues. Blocked/unavailable/integrity fail closed and record
-    reconciliation debt; ungoverned/unconfigured close with no network call."""
+def _make_stale(db: FiligreeDB, issue_id: str, entity: str = "ent-1") -> None:
+    """Drift the sign-off: a signatureless re-attach advances the content past the signed snapshot."""
+    db.add_entity_association(issue_id, entity, content_hash="h-drifted", actor="agent")
 
-    def test_governed_issue_not_closed_when_legis_blocks(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("LEGIS_URL", "http://legis.invalid")
-        monkeypatch.setattr(governance, "check_closure_gate", lambda _id: LegisGateResult(LegisGateStatus.BLOCKED, reason="not signed off"))
-        finding_id, issue_id = _resolved_finding_linked_to_issue(db, "fp-block")
+
+def _warning_events(db: FiligreeDB, issue_id: str) -> list[str]:
+    return [e["new_value"] or "" for e in db.get_issue_events(issue_id) if e["event_type"] == "governance_warning"]
+
+
+class TestGatedCascadeClose:
+    """The finding→issue auto-close consults the closure gate for governed
+    issues. A drifted (stale) binding fails closed and records reconciliation
+    debt; a fresh governed issue closes with the archived-provider warning (Legis
+    is retired and never consulted); ungoverned/unconfigured close silently."""
+
+    def test_governed_issue_not_closed_when_binding_is_stale(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+        governance_on(monkeypatch, "http://legis.invalid")
+        finding_id, issue_id = _resolved_finding_linked_to_issue(db, "fp-stale")
         _govern(db, issue_id)
+        _make_stale(db, issue_id)
 
         warnings: list[str] = []
         closed = db._close_issue_for_fixed_finding(finding_id, issue_id, warnings=warnings)
@@ -122,187 +131,70 @@ class TestGatedCascadeClose:
         assert any("not auto-closed" in w for w in warnings)  # surfaced
         assert _debt_count(db, issue_id) == 1  # debt recorded
 
-    def test_governed_issue_closed_when_legis_allows(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("LEGIS_URL", "http://legis.invalid")
-        monkeypatch.setattr(governance, "check_closure_gate", lambda _id: LegisGateResult(LegisGateStatus.ALLOWED))
+    def test_governed_issue_closes_with_archived_warning_event(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+        # M-7: an unreachable/archived Legis must never wedge or defer the cascade close.
+        governance_on(monkeypatch, "http://legis.invalid")
         finding_id, issue_id = _resolved_finding_linked_to_issue(db, "fp-allow")
         _govern(db, issue_id)
 
         assert db._close_issue_for_fixed_finding(finding_id, issue_id, warnings=[]) is True
         assert _is_done(db, issue_id)
-
-    def test_governed_issue_fails_closed_when_legis_unreachable(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("LEGIS_URL", "http://legis.invalid")
-        monkeypatch.setattr(governance, "check_closure_gate", lambda _id: LegisGateResult(LegisGateStatus.UNREACHABLE, reason="timeout"))
-        finding_id, issue_id = _resolved_finding_linked_to_issue(db, "fp-unreach")
-        _govern(db, issue_id)
-
-        warnings: list[str] = []
-        assert db._close_issue_for_fixed_finding(finding_id, issue_id, warnings=warnings) is False
-        assert not _is_done(db, issue_id)
-        assert _debt_count(db, issue_id) == 1  # fail-closed still records debt
+        assert _warning_events(db, issue_id) == [ARCHIVED_WARNING]
+        assert _debt_count(db, issue_id) == 0
 
     def test_ungoverned_issue_still_auto_closes(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("LEGIS_URL", "http://legis.invalid")
-        # no signature attached → evaluate_closure_gate short-circuits PROCEED, no network
-        called: list[str] = []
-        monkeypatch.setattr(governance, "check_closure_gate", lambda iid: called.append(iid) or LegisGateResult(LegisGateStatus.BLOCKED))
+        governance_on(monkeypatch, "http://legis.invalid")
         finding_id, issue_id = _resolved_finding_linked_to_issue(db, "fp-ungov")
 
         assert db._close_issue_for_fixed_finding(finding_id, issue_id, warnings=[]) is True
         assert _is_done(db, issue_id)
-        assert called == []  # ungoverned → no network call
+        assert _warning_events(db, issue_id) == []  # ungoverned → no warning
 
     def test_governed_issue_closes_when_legis_unconfigured(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv("LEGIS_URL", raising=False)  # governance OFF → PROCEED, no network
-        called: list[str] = []
-        monkeypatch.setattr(governance, "check_closure_gate", lambda iid: called.append(iid) or LegisGateResult(LegisGateStatus.BLOCKED))
+        monkeypatch.delenv("LEGIS_URL", raising=False)  # governance OFF → PROCEED, no warning
         finding_id, issue_id = _resolved_finding_linked_to_issue(db, "fp-unconf")
         _govern(db, issue_id)
 
         assert db._close_issue_for_fixed_finding(finding_id, issue_id, warnings=[]) is True
         assert _is_done(db, issue_id)
-        assert called == []
+        assert _warning_events(db, issue_id) == []
 
 
-class TestBatchShortCircuit:
-    """Task 3: once Legis is seen UNAVAILABLE in a batch, the rest of the batch
-    defers to reconciliation debt without re-calling Legis — bounding a down /
-    slow Legis to one timeout per batch (legis_client's default is 5 s)."""
+class TestBatchCascade:
+    """Batch cascade close: every governed issue is gated on its own local
+    checks; Legis is retired, so there is no Legis-down short-circuit."""
 
-    def test_batch_short_circuits_after_legis_unreachable(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("LEGIS_URL", "http://legis.invalid")
-        calls = {"n": 0}
-
-        def _gate(_issue_id: str) -> LegisGateResult:
-            calls["n"] += 1
-            return LegisGateResult(LegisGateStatus.UNREACHABLE, reason="timeout")
-
-        monkeypatch.setattr(governance, "check_closure_gate", _gate)
-
+    def test_batch_of_governed_issues_all_close_without_network(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+        governance_on(monkeypatch, "http://legis.invalid")
         candidates: list[tuple[str, str]] = []
         for i in range(3):
             finding_id, issue_id = _resolved_finding_linked_to_issue(db, f"fp-sc-{i}")
             _govern(db, issue_id, entity=f"ent-sc-{i}")
             candidates.append((finding_id, issue_id))
 
-        warnings: list[str] = []
-        closed = db._finding_issue_cascade_service().close_resolved_findings(candidates, warnings=warnings)
-
-        assert calls["n"] == 1  # only the first governed issue actually called Legis
-        assert closed == []  # none closed (all deferred)
-        n = db.conn.execute("SELECT COUNT(*) AS n FROM comments WHERE author = 'filigree:reconciliation'").fetchone()["n"]
-        assert n == 3  # all three recorded debt
-        for _finding_id, issue_id in candidates:
-            assert not _is_done(db, issue_id)
-
-    def test_batch_integrity_failure_not_short_circuited(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
-        """INTEGRITY_FAILURE is a per-issue ledger-tamper verdict, not a
-        connectivity problem — every governed issue is still evaluated."""
-        monkeypatch.setenv("LEGIS_URL", "http://legis.invalid")
-        calls = {"n": 0}
-
-        def _gate(_issue_id: str) -> LegisGateResult:
-            calls["n"] += 1
-            return LegisGateResult(LegisGateStatus.INTEGRITY_FAILURE, reason="tampered")
-
-        monkeypatch.setattr(governance, "check_closure_gate", _gate)
-
-        candidates: list[tuple[str, str]] = []
-        for i in range(3):
-            finding_id, issue_id = _resolved_finding_linked_to_issue(db, f"fp-int-{i}")
-            _govern(db, issue_id, entity=f"ent-int-{i}")
-            candidates.append((finding_id, issue_id))
-
-        db._finding_issue_cascade_service().close_resolved_findings(candidates, warnings=[])
-        assert calls["n"] == 3  # each issue evaluated; integrity is not short-circuited
-
-    def test_batch_contract_violation_not_short_circuited(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
-        """A contract-violating 2xx (INVALID_RESPONSE) is a per-issue verdict, NOT
-        a connectivity failure: Legis *answered*, so every governed issue in the
-        batch must still get its own (cheap, already-responding) gate evaluation
-        rather than being starved by the legis-down short-circuit. Each fails
-        closed locally and records debt."""
-        monkeypatch.setenv("LEGIS_URL", "http://legis.invalid")
-        calls = {"n": 0}
-
-        def _gate(_issue_id: str) -> LegisGateResult:
-            calls["n"] += 1
-            return LegisGateResult(LegisGateStatus.INVALID_RESPONSE, reason="2xx did not affirm allowed=true")
-
-        monkeypatch.setattr(governance, "check_closure_gate", _gate)
-
-        candidates: list[tuple[str, str]] = []
-        for i in range(3):
-            finding_id, issue_id = _resolved_finding_linked_to_issue(db, f"fp-cv-{i}")
-            _govern(db, issue_id, entity=f"ent-cv-{i}")
-            candidates.append((finding_id, issue_id))
-
         closed = db._finding_issue_cascade_service().close_resolved_findings(candidates, warnings=[])
-        assert calls["n"] == 3  # each issue evaluated; contract-violation is not short-circuited
-        assert closed == []  # all fail closed
-        for _finding_id, issue_id in candidates:
-            assert not _is_done(db, issue_id)
-            assert _debt_count(db, issue_id) == 1
 
-    def test_batch_closes_allowed_and_defers_blocked(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
-        """An allowed issue closes; a blocked one in the same batch defers."""
-        monkeypatch.setenv("LEGIS_URL", "http://legis.invalid")
+        assert closed == [issue_id for _f, issue_id in candidates]
+        for _finding_id, issue_id in candidates:
+            assert _is_done(db, issue_id)
+            assert _debt_count(db, issue_id) == 0
+            assert _warning_events(db, issue_id) == [ARCHIVED_WARNING]
+
+    def test_batch_closes_fresh_and_defers_stale(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A fresh governed issue closes; a drifted one in the same batch defers."""
+        governance_on(monkeypatch, "http://legis.invalid")
 
         f_a, issue_a = _resolved_finding_linked_to_issue(db, "fp-mix-a")
-        f_b, blocked_id = _resolved_finding_linked_to_issue(db, "fp-mix-b")
+        f_b, stale_id = _resolved_finding_linked_to_issue(db, "fp-mix-b")
         _govern(db, issue_a)
-        _govern(db, blocked_id, entity="ent-b")
+        _govern(db, stale_id, entity="ent-b")
+        _make_stale(db, stale_id, entity="ent-b")
 
-        def _gate(issue_id: str) -> LegisGateResult:
-            return (
-                LegisGateResult(LegisGateStatus.BLOCKED, reason="no")
-                if issue_id == blocked_id
-                else LegisGateResult(LegisGateStatus.ALLOWED)
-            )
-
-        monkeypatch.setattr(governance, "check_closure_gate", _gate)
-
-        closed = db._finding_issue_cascade_service().close_resolved_findings([(f_a, issue_a), (f_b, blocked_id)], warnings=[])
+        closed = db._finding_issue_cascade_service().close_resolved_findings([(f_a, issue_a), (f_b, stale_id)], warnings=[])
         assert closed == [issue_a]
         assert _is_done(db, issue_a)
-        assert not _is_done(db, blocked_id)
-
-    def test_batch_legis_down_does_not_block_later_ungoverned_issue(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
-        """A governed issue proving Legis down must NOT block a later UNGOVERNED
-        issue in the same (unordered) batch. Ungoverned closes never touch Legis
-        (DECISION 1A), so they must always PROCEED even after the legis-down
-        short-circuit trips.
-
-        Regression: the short-circuit handed every remaining candidate a
-        synthetic UNAVAILABLE *without* the cheap local governed-ness read, so an
-        ungoverned issue appearing after a governed-down one was wrongly deferred
-        and tagged with spurious "governed issue … unreachable" debt.
-        """
-        monkeypatch.setenv("LEGIS_URL", "http://legis.invalid")
-        called: list[str] = []
-
-        def _gate(issue_id: str) -> LegisGateResult:
-            called.append(issue_id)
-            return LegisGateResult(LegisGateStatus.UNREACHABLE, reason="timeout")
-
-        monkeypatch.setattr(governance, "check_closure_gate", _gate)
-
-        # Governed-down candidate FIRST so legis_down is already set when the
-        # ungoverned candidate is processed — the only ordering that exercises
-        # the bug (ungoverned-first was never short-circuited).
-        f_gov, gov_id = _resolved_finding_linked_to_issue(db, "fp-gd-gov")
-        _govern(db, gov_id, entity="ent-gd")
-        f_ung, ung_id = _resolved_finding_linked_to_issue(db, "fp-gd-ung")  # ungoverned
-
-        closed = db._finding_issue_cascade_service().close_resolved_findings([(f_gov, gov_id), (f_ung, ung_id)], warnings=[])
-
-        assert closed == [ung_id]  # ungoverned still closes
-        assert not _is_done(db, gov_id)  # governed-down defers
-        assert _is_done(db, ung_id)
-        assert _debt_count(db, gov_id) == 1  # governed-down → debt
-        assert _debt_count(db, ung_id) == 0  # ungoverned → NO spurious debt
-        assert called == [gov_id]  # only the governed issue ever hit Legis
+        assert not _is_done(db, stale_id)
+        assert _debt_count(db, stale_id) == 1
 
 
 class _FakeDriftRegistry:
@@ -354,11 +246,11 @@ class _FakeDriftRegistry:
 
 
 class TestBatchLoomweaveShortCircuit:
-    """hub weft-aee5769607 item 1: the RED-1 drift probe is bounded the same way
-    as the Legis round-trip — a down Loomweave costs ONE retry budget per batch,
-    not one per governed issue. Unlike Legis this is enrich-only: later issues
-    get freshness UNKNOWN and still receive their own Legis verdict; nothing is
-    deferred or turned into reconciliation debt on Loomweave's account.
+    """hub weft-aee5769607 item 1: the RED-1 drift probe is bounded per batch —
+    a down Loomweave costs ONE retry budget per batch, not one per governed
+    issue. It is enrich-only: later issues get freshness UNKNOWN and are still
+    gated on their own local checks; nothing is deferred or turned into
+    reconciliation debt on Loomweave's account.
 
     ``_govern`` writes ``content_hash='h'`` + a signature, so the sign-off
     snapshot is fresh and the drift check DOES reach the registry — the path
@@ -375,12 +267,8 @@ class TestBatchLoomweaveShortCircuit:
 
     def test_batch_probes_loomweave_once_when_down(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
         """N governed closes with Loomweave down -> exactly one probe, and every
-        issue still closes via its own (ALLOWED) Legis verdict."""
-        monkeypatch.setenv("LEGIS_URL", "http://legis.invalid")
-        legis_calls: list[str] = []
-        monkeypatch.setattr(
-            governance, "check_closure_gate", lambda iid: legis_calls.append(iid) or LegisGateResult(LegisGateStatus.ALLOWED)
-        )
+        issue still closes (enrich-only)."""
+        governance_on(monkeypatch, "http://legis.invalid")
         candidates = self._governed_batch(db, "lw")
         fake = _FakeDriftRegistry(raise_unavailable=True)
         monkeypatch.setattr(db, "registry", fake)
@@ -390,7 +278,6 @@ class TestBatchLoomweaveShortCircuit:
 
         assert len(fake.calls) == 1  # one probe per batch, not one per governed issue
         assert closed == [issue_id for _f, issue_id in candidates]  # enrich-only: nothing deferred
-        assert legis_calls == [issue_id for _f, issue_id in candidates]  # each still got its Legis verdict
         for _finding_id, issue_id in candidates:
             assert _is_done(db, issue_id)
             assert _debt_count(db, issue_id) == 0  # Loomweave-down never becomes debt
@@ -403,8 +290,7 @@ class TestBatchLoomweaveShortCircuit:
         drifted binding is caught as STALE instead of being auto-closed."""
         from filigree.registry import RegistryUnavailableError
 
-        monkeypatch.setenv("LEGIS_URL", "http://legis.invalid")
-        monkeypatch.setattr(governance, "check_closure_gate", lambda _iid: LegisGateResult(LegisGateStatus.ALLOWED))
+        governance_on(monkeypatch, "http://legis.invalid")
         candidates = self._governed_batch(db, "lw413")
         oversize = RegistryUnavailableError("HTTP 413 Payload Too Large", url="http://loomweave.invalid", cause_kind="http_error")
         fake = _FakeDriftRegistry({"ent-lw413-1": "h2", "ent-lw413-2": "h"}, raise_for_entity={"ent-lw413-0": oversize})
@@ -427,8 +313,7 @@ class TestBatchLoomweaveShortCircuit:
         evidence Loomweave is up, so it must NOT feed the batch known-down
         bound: issues 1 and 2 are still probed and issue 1's drifted binding is
         caught as STALE instead of auto-closing."""
-        monkeypatch.setenv("LEGIS_URL", "http://legis.invalid")
-        monkeypatch.setattr(governance, "check_closure_gate", lambda _iid: LegisGateResult(LegisGateStatus.ALLOWED))
+        governance_on(monkeypatch, "http://legis.invalid")
         candidates = self._governed_batch(db, "lwlin")
         fake = _FakeDriftRegistry({"ent-lwlin-1": "h2", "ent-lwlin-2": "h"}, lineage_unavailable_for={"ent-lwlin-0"})
         monkeypatch.setattr(db, "registry", fake)
@@ -448,12 +333,10 @@ class TestBatchLoomweaveShortCircuit:
         """A reverse proxy answering 502/503/504 for a dead Loomweave is
         input-independent: after issue 0's probe retried out on it, later issues
         must not each re-burn the full retry budget — one probe per batch, like
-        a network failure. Enrich-only: every issue still closes on its own
-        Legis verdict."""
+        a network failure. Enrich-only: every issue still closes."""
         from filigree.registry import RegistryUnavailableError
 
-        monkeypatch.setenv("LEGIS_URL", "http://legis.invalid")
-        monkeypatch.setattr(governance, "check_closure_gate", lambda _iid: LegisGateResult(LegisGateStatus.ALLOWED))
+        governance_on(monkeypatch, "http://legis.invalid")
         candidates = self._governed_batch(db, f"lwgw{status_code}")
         gateway = RegistryUnavailableError(
             f"HTTP {status_code}", url="http://loomweave.invalid", cause_kind="http_error", status_code=status_code
@@ -468,35 +351,10 @@ class TestBatchLoomweaveShortCircuit:
         for _finding_id, issue_id in candidates:
             assert _debt_count(db, issue_id) == 0
 
-    def test_batch_loomweave_down_and_legis_down_each_probed_once(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Both backends down: one Loomweave probe AND one Legis call for the
-        whole batch; all defer to debt on Legis's account (DECISION 2)."""
-        monkeypatch.setenv("LEGIS_URL", "http://legis.invalid")
-        calls = {"n": 0}
-
-        def _gate(_issue_id: str) -> LegisGateResult:
-            calls["n"] += 1
-            return LegisGateResult(LegisGateStatus.UNREACHABLE, reason="timeout")
-
-        monkeypatch.setattr(governance, "check_closure_gate", _gate)
-        candidates = self._governed_batch(db, "lwlg")
-        fake = _FakeDriftRegistry(raise_unavailable=True)
-        monkeypatch.setattr(db, "registry", fake)
-
-        closed = db._finding_issue_cascade_service().close_resolved_findings(candidates, warnings=[])
-
-        assert len(fake.calls) == 1
-        assert calls["n"] == 1
-        assert closed == []
-        for _finding_id, issue_id in candidates:
-            assert not _is_done(db, issue_id)
-            assert _debt_count(db, issue_id) == 1
-
     def test_batch_loomweave_healthy_resolves_every_issue(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
         """No spurious short-circuit when Loomweave is up: every governed issue
         is probed, and only the one whose current code drifted is deferred."""
-        monkeypatch.setenv("LEGIS_URL", "http://legis.invalid")
-        monkeypatch.setattr(governance, "check_closure_gate", lambda _iid: LegisGateResult(LegisGateStatus.ALLOWED))
+        governance_on(monkeypatch, "http://legis.invalid")
         candidates = self._governed_batch(db, "lwok")
         # Second issue's entity moved on since attach ('h' -> 'h2'); the rest match.
         fake = _FakeDriftRegistry({"ent-lwok-0": "h", "ent-lwok-1": "h2", "ent-lwok-2": "h"})
@@ -511,30 +369,6 @@ class TestBatchLoomweaveShortCircuit:
         assert _is_done(db, id2)
         assert not _is_done(db, id1)
         assert _debt_count(db, id1) == 1  # STALE is a per-issue verdict; recorded as debt
-
-    def test_batch_legis_down_short_circuit_unchanged(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Loomweave healthy, Legis down: the Legis short-circuit semantics are
-        unchanged (one Legis call, all defer) while every issue still gets its
-        cheap drift probe (drift runs before the legis_known_down check)."""
-        monkeypatch.setenv("LEGIS_URL", "http://legis.invalid")
-        calls = {"n": 0}
-
-        def _gate(_issue_id: str) -> LegisGateResult:
-            calls["n"] += 1
-            return LegisGateResult(LegisGateStatus.UNREACHABLE, reason="timeout")
-
-        monkeypatch.setattr(governance, "check_closure_gate", _gate)
-        candidates = self._governed_batch(db, "lgonly")
-        fake = _FakeDriftRegistry({f"ent-lgonly-{i}": "h" for i in range(3)})
-        monkeypatch.setattr(db, "registry", fake)
-
-        closed = db._finding_issue_cascade_service().close_resolved_findings(candidates, warnings=[])
-
-        assert calls["n"] == 1
-        assert len(fake.calls) == 3
-        assert closed == []
-        for _finding_id, issue_id in candidates:
-            assert _debt_count(db, issue_id) == 1
 
 
 class TestListReconciliationDebt:

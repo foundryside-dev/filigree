@@ -20,9 +20,12 @@ from filigree.types.api import (
     ErrorCode,
     InvalidTransitionError,
     IssueDeletionRefusedError,
+    NoOpResponse,
+    UndoConflictError,
     claim_conflict_envelope,
     classify_release_claim_error,
     classify_value_error,
+    undo_conflict_envelope,
 )
 from filigree.validation import sanitize_actor
 
@@ -717,7 +720,10 @@ def update_issue_cmd(
 @click.option(
     "--commit",
     default=None,
-    help="Opaque branch@sha commit anchor (warpline seam); stored verbatim as close_commit.",
+    help=(
+        "Opaque branch@sha commit anchor (warpline seam); stored verbatim as close_commit. "
+        "Warns (never blocks) when the sha is not reachable from origin/<integration_ref>."
+    ),
 )
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.pass_context
@@ -757,6 +763,8 @@ def close(
                     force=force,
                     commit=commit,
                 )
+                # Task 0.6: advisory warnings (closure gate + commit reachability).
+                close_warnings = [*gate.warnings, *issue.close_warnings]
                 if as_json:
                     item: dict[str, Any] = {
                         "issue_id": issue.id,
@@ -767,9 +775,13 @@ def close(
                     }
                     if annotation_warnings:
                         item["annotation_warnings"] = annotation_warnings
+                    if close_warnings:
+                        item["warnings"] = close_warnings
                     succeeded.append(item)
                 else:
                     click.echo(f"Closed {issue.id}: {issue.title}")
+                    for close_warning in close_warnings:
+                        click.echo(f"Warning: {close_warning}", err=True)
                     for warning in annotation_warnings:
                         click.echo(
                             f"Annotation warning: {warning['annotation_id']} must be considered for {warning['file_path']}",
@@ -990,8 +1002,14 @@ def claim_next(
             if as_json:
                 # Mirror the MCP ClaimNextResponse shape (types/api.py:140) — emit
                 # the issue dict plus selection_reason via the shared formatter.
-                payload = public_issue_with(issue, selection_reason=issue.format_claim_next_reason())
+                payload = public_issue_with(
+                    issue,
+                    selection_reason=issue.format_claim_next_reason(),
+                    already_holding=issue.already_holding,
+                )
                 click.echo(json_mod.dumps(payload, indent=2, default=str))
+            elif issue.already_holding:
+                click.echo(f"Already holding {issue.id}: {issue.title} [{issue.status}] -> {issue.assignee}")
             else:
                 click.echo(f"Claimed {issue.id}: {issue.title} [{issue.status}] -> {assignee}")
         refresh_summary(db)
@@ -1002,13 +1020,20 @@ def _release_impl(
     issue_id: str,
     as_json: bool,
     *,
-    if_held: bool = False,
+    override: bool = False,
     expected_assignee: str | None = None,
     reason: str = "",
 ) -> None:
     with get_db() as db:
         try:
-            issue = db.release_claim(issue_id, actor=actor, if_held=if_held, expected_assignee=expected_assignee, reason=reason)
+            issue = db.release_claim(issue_id, actor=actor, override=override, expected_assignee=expected_assignee, reason=reason)
+            if issue is None:
+                # Nobody holds it: the idempotent no-op, not an error (exit 0).
+                if as_json:
+                    click.echo(json_mod.dumps(NoOpResponse(result="no_op", reason="not_claimed")))
+                else:
+                    click.echo(f"No-op: {issue_id} is not claimed")
+                return
             if as_json:
                 click.echo(json_mod.dumps(issue_to_public(issue), indent=2, default=str))
             else:
@@ -1061,47 +1086,55 @@ def _release_impl(
 @click.command("release", cls=ActorCommand)
 @click.argument("issue_id")
 @click.option(
-    "--if-held",
+    "--override",
     is_flag=True,
-    help="Idempotently release only if held by --expected-assignee or the global --actor; no-op if unassigned.",
+    help="Coordinator release of a claim the --actor does not hold (recorded as released_by_override).",
 )
-@click.option("--expected-assignee", default=None, help="Expected current assignee for --if-held coordinator flows.")
+@click.option(
+    "--expected-assignee",
+    default=None,
+    help="Extra CAS guard on the current holder (never authorizes a non-holder; --actor must hold the claim unless --override).",
+)
 @click.option("--reason", default="", help="Audit reason for releasing the claim.")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.pass_context
 def release(
     ctx: click.Context,
     issue_id: str,
-    if_held: bool,
+    override: bool,
     expected_assignee: str | None,
     reason: str,
     as_json: bool,
 ) -> None:
-    """Release a claimed issue by clearing its assignee."""
-    _release_impl(ctx.obj["actor"], issue_id, as_json, if_held=if_held, expected_assignee=expected_assignee, reason=reason)
+    """Release a claim you hold (holder-checked against --actor); no-op if unclaimed."""
+    _release_impl(ctx.obj["actor"], issue_id, as_json, override=override, expected_assignee=expected_assignee, reason=reason)
 
 
 @click.command("release-claim", cls=ActorCommand)
 @click.argument("issue_id")
 @click.option(
-    "--if-held",
+    "--override",
     is_flag=True,
-    help="Idempotently release only if held by --expected-assignee or the global --actor; no-op if unassigned.",
+    help="Coordinator release of a claim the --actor does not hold (recorded as released_by_override).",
 )
-@click.option("--expected-assignee", default=None, help="Expected current assignee for --if-held coordinator flows.")
+@click.option(
+    "--expected-assignee",
+    default=None,
+    help="Extra CAS guard on the current holder (never authorizes a non-holder; --actor must hold the claim unless --override).",
+)
 @click.option("--reason", default="", help="Audit reason for releasing the claim.")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.pass_context
 def release_claim_cmd(
     ctx: click.Context,
     issue_id: str,
-    if_held: bool,
+    override: bool,
     expected_assignee: str | None,
     reason: str,
     as_json: bool,
 ) -> None:
-    """Release a claimed issue by clearing its assignee. Alias for `release`."""
-    _release_impl(ctx.obj["actor"], issue_id, as_json, if_held=if_held, expected_assignee=expected_assignee, reason=reason)
+    """Release a claim you hold (holder-checked against --actor). Alias for `release`."""
+    _release_impl(ctx.obj["actor"], issue_id, as_json, override=override, expected_assignee=expected_assignee, reason=reason)
 
 
 @click.command("release-my-claims", cls=ActorCommand)
@@ -1184,7 +1217,17 @@ def release_my_claims_cmd(
 
 @click.command("heartbeat-work", cls=ActorCommand)
 @click.argument("issue_id")
-@click.option("--expected-assignee", default=None, help="Expected current assignee; defaults to global --actor.")
+@click.option(
+    "--expected-assignee",
+    default=None,
+    help="Extra compare-and-swap guard on the current assignee; never authorizes a non-holder.",
+)
+@click.option(
+    "--override",
+    is_flag=True,
+    default=False,
+    help="Coordinator refresh of a claim the --actor does not hold (recorded as heartbeat_by_override).",
+)
 @click.option("--lease-hours", default=48, type=int, help="Lease duration from this heartbeat.")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.pass_context
@@ -1192,10 +1235,11 @@ def heartbeat_work_cmd(
     ctx: click.Context,
     issue_id: str,
     expected_assignee: str | None,
+    override: bool,
     lease_hours: int,
     as_json: bool,
 ) -> None:
-    """Refresh claim liveness metadata for the current holder."""
+    """Refresh claim liveness metadata. Holder-checked: the global --actor must hold the claim."""
     _range_check_int(lease_hours, "lease_hours", min_val=1, max_val=8760, as_json=as_json)
     with get_db() as db:
         try:
@@ -1203,6 +1247,7 @@ def heartbeat_work_cmd(
                 issue_id,
                 actor=ctx.obj["actor"],
                 expected_assignee=expected_assignee,
+                override=override,
                 lease_hours=lease_hours,
             )
         except KeyError:
@@ -1348,46 +1393,72 @@ def reclaim_cmd(
         refresh_summary(db)
 
 
-def _undo_impl(actor: str, issue_id: str, as_json: bool) -> None:
+def _undo_impl(actor: str, issue_id: str, as_json: bool, *, expected_event_id: int, override: bool) -> None:
     with get_db() as db:
         try:
-            result = db.undo_last(issue_id, actor=actor)
+            result = db.undo_last(issue_id, actor=actor, expected_event_id=expected_event_id, override=override)
         except KeyError:
             if as_json:
                 click.echo(json_mod.dumps({"error": f"Not found: {issue_id}", "code": ErrorCode.NOT_FOUND}))
             else:
                 click.echo(f"Not found: {issue_id}", err=True)
             sys.exit(1)
+        except UndoConflictError as e:
+            if as_json:
+                click.echo(json_mod.dumps(undo_conflict_envelope(e)))
+            else:
+                click.echo(f"Error: {e} ({json_mod.dumps(e.details)})", err=True)
+            sys.exit(1)
+        except ValueError as e:
+            if as_json:
+                click.echo(json_mod.dumps({"error": str(e), "code": ErrorCode.VALIDATION}))
+            else:
+                click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
 
+        if "result" in result:
+            # Nothing left to reverse: the idempotent no-op (exit 0).
+            if as_json:
+                click.echo(json_mod.dumps(result))
+            else:
+                click.echo(f"No-op: nothing to undo on {issue_id}")
+            return
         if as_json:
             click.echo(json_mod.dumps(result, indent=2, default=str))
-            if not result["undone"]:
+            if result.get("undone") is not True:
                 sys.exit(1)
+        elif result.get("undone") is True:
+            click.echo(f"Undone {result.get('event_type')} (event #{result.get('event_id')}) on {issue_id}")
         else:
-            if result["undone"]:
-                click.echo(f"Undone {result['event_type']} (event #{result['event_id']}) on {issue_id}")
-            else:
-                click.echo(f"Cannot undo: {result['reason']}", err=True)
-                sys.exit(1)
+            click.echo(f"Cannot undo: {result.get('reason')}", err=True)
+            sys.exit(1)
         refresh_summary(db)
+
+
+_EXPECTED_EVENT_ID_HELP = "Id of the event to reverse (see `filigree events <id>`); must be the newest reversible event."
+_UNDO_OVERRIDE_HELP = "Coordinator undo on an issue whose live claim another actor holds."
 
 
 @click.command(cls=ActorCommand)
 @click.argument("issue_id")
+@click.option("--expected-event-id", type=int, required=True, help=_EXPECTED_EVENT_ID_HELP)
+@click.option("--override", is_flag=True, help=_UNDO_OVERRIDE_HELP)
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.pass_context
-def undo(ctx: click.Context, issue_id: str, as_json: bool) -> None:
+def undo(ctx: click.Context, issue_id: str, expected_event_id: int, override: bool, as_json: bool) -> None:
     """Undo the most recent reversible action on an issue."""
-    _undo_impl(ctx.obj["actor"], issue_id, as_json)
+    _undo_impl(ctx.obj["actor"], issue_id, as_json, expected_event_id=expected_event_id, override=override)
 
 
 @click.command("undo-last", cls=ActorCommand)
 @click.argument("issue_id")
+@click.option("--expected-event-id", type=int, required=True, help=_EXPECTED_EVENT_ID_HELP)
+@click.option("--override", is_flag=True, help=_UNDO_OVERRIDE_HELP)
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.pass_context
-def undo_last_cmd(ctx: click.Context, issue_id: str, as_json: bool) -> None:
+def undo_last_cmd(ctx: click.Context, issue_id: str, expected_event_id: int, override: bool, as_json: bool) -> None:
     """Undo the most recent reversible action on an issue. Alias for `undo`."""
-    _undo_impl(ctx.obj["actor"], issue_id, as_json)
+    _undo_impl(ctx.obj["actor"], issue_id, as_json, expected_event_id=expected_event_id, override=override)
 
 
 @click.command("delete-issue", cls=ActorCommand)
@@ -1630,7 +1701,9 @@ def start_next_work(
             return
 
         if as_json:
-            click.echo(json_mod.dumps(issue_to_public(claimed), indent=2, default=str))
+            click.echo(json_mod.dumps(public_issue_with(claimed, already_holding=claimed.already_holding), indent=2, default=str))
+        elif claimed.already_holding:
+            click.echo(f"Already holding {claimed.id}: status={claimed.status}, assignee={claimed.assignee}")
         else:
             click.echo(f"Started work on {claimed.id}: status={claimed.status}, assignee={claimed.assignee}")
         refresh_summary(db)

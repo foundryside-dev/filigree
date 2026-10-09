@@ -261,7 +261,12 @@ class TestClassicGenerationParityScanResults:
 # ---------------------------------------------------------------------------
 
 
-_WEFT_SCAN_RESULTS_EXAMPLES = _examples_for("weft", "scan-results")
+# An example may carry ``"replayable": false`` when the live replay cannot
+# reproduce its precondition (e.g. a Loomweave BODY_TOO_LARGE over-cap drop); it
+# is then bound to the live handler by a purpose-built test instead (the example's
+# ``replay_note`` names it). ``setup_requests`` are POSTed first, unasserted, to
+# establish state the example depends on (e.g. a replay needs a stored finding).
+_WEFT_SCAN_RESULTS_EXAMPLES = [e for e in _examples_for("weft", "scan-results") if e.get("replayable", True)]
 
 
 @pytest.mark.asyncio
@@ -281,6 +286,9 @@ class TestWeftGenerationParityScanResults:
         dashboard_surface: AsyncClient,
         example: dict[str, Any],
     ) -> None:
+        for setup in example.get("setup_requests", []):
+            setup_resp = await dashboard_surface.request(setup["method"], setup["path"], json=setup["body"])
+            assert setup_resp.status_code < 400, f"{example['name']}: setup request failed: {setup_resp.text!r}"
         req = example["request"]
         expected_resp = example["response"]
         resp = await dashboard_surface.request(req["method"], req["path"], json=req["body"])
@@ -695,11 +703,12 @@ _WEFT_ISSUE_FIXTURE_SLUGS: list[str] = [
 # Fixture replay runs against an UNSEEDED dashboard. A populated-success golden
 # whose id cannot exist here is excluded BY NAME (the fixture is a normative
 # cross-repo contract byte-mirrored by Loomweave, so it carries no harness
-# control flags); its producer oracle under tests/federation/ seeds a real row
-# and pins that shape instead.
+# control flags); its producer oracle under tests/federation/ (or the seeded
+# lifecycle test in this module) seeds real rows and pins that shape instead.
 _SEEDED_ONLY_EXAMPLES: frozenset[tuple[str, str]] = frozenset(
     {
         ("issues-get", "live_v_issue_detail_200"),  # tests/federation/test_weft_issue_detail_wire_conformance_oracle.py
+        ("issues-claim-next", "success_default_ready_release"),  # test_full_lifecycle_pins_issue_weft_shape
     }
 )
 
@@ -860,7 +869,7 @@ class TestWeftGenerationParityIssues:
         assert cl.json()["assignee"] == "tester"
 
         # RELEASE
-        rl = await dashboard_surface.post(f"/api/weft/issues/{a_id}/release", json={})
+        rl = await dashboard_surface.post(f"/api/weft/issues/{a_id}/release", json={"actor": "tester"})
         assert rl.status_code == 200, rl.text
         _assert_issue_weft_shape(rl.json(), path="release")
 
@@ -1044,7 +1053,7 @@ class TestWeftGenerationParityLists:
         assert resp.status_code == 200, resp.text
         body = resp.json()
         _assert_list_response_shape(body, path="blocked")
-        # Find B in the items (auto-seeded "Future" release won't be blocked).
+        # Find B in the items (only B is blocked).
         blocked_ids = [item["issue_id"] for item in body["items"]]
         assert b_id in blocked_ids, f"expected {b_id} in blocked items, got {blocked_ids}"
         b_item = next(item for item in body["items"] if item["issue_id"] == b_id)

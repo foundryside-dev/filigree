@@ -1,6 +1,6 @@
 # Team Coordination
 
-Multi-agent swarm protocols for filigree 2.0. Load this reference when coordinating
+Multi-agent swarm protocols for filigree. Load this reference when coordinating
 work across multiple agents.
 
 ## Atomic Start
@@ -8,7 +8,7 @@ work across multiple agents.
 ### The Race Condition Problem
 
 When multiple agents call `filigree update <issue-id> --status=<wip>`
-simultaneously, both think they own the issue. Filigree 2.0 solves this with
+simultaneously, both think they own the issue. Filigree solves this with
 `start-work`, which atomically claims the issue *and* transitions it to its
 type-specific working status (tasks → `in_progress`, features → `building`,
 bugs → `fixing`) in a single DB transaction with optimistic locking on the
@@ -25,7 +25,7 @@ filigree start-next-work --assignee <agent-name>
 ```
 
 If another agent already claimed the issue, the call fails with
-`code: CONFLICT` (CLI exit 4). No silent overwrite, no half-claimed state —
+`code: CONFLICT` (CLI exit 1). No silent overwrite, no half-claimed state —
 either both the claim and the transition land, or neither does.
 
 `start-next-work` accepts the work-scoping filters `claim-next` also
@@ -45,7 +45,7 @@ filigree claim <issue-id> --assignee <agent-name>
 filigree claim-next --assignee <agent-name>
 ```
 
-These are kept for niche use; `start-work` is the default in 2.0.
+These are kept for niche use; `start-work` is the default.
 
 ### Releasing Claims
 
@@ -53,10 +53,12 @@ If an agent cannot finish the work:
 
 ```bash
 filigree add-comment <issue-id> "Releasing: blocked on X, needs Y to continue"
-filigree release <issue-id>
+filigree --actor <you> release <issue-id>           # only releases a claim you hold
 ```
 
 Always add a comment before releasing — the next agent needs context.
+Release is holder-checked against `--actor`; releasing an issue nobody holds
+is a harmless no-op.
 
 ## Handoff Protocol
 
@@ -168,20 +170,34 @@ If agents discover their tasks overlap:
 
 ### Stale Claims
 
-If an agent disappears without completing work:
+If an agent disappears without completing work, transfer its claim with
+`reclaim` — a holder-checked compare-and-swap that only succeeds while the
+missing agent still holds it. Never `release` a peer's claim: release is
+holder-checked and refuses with `CONFLICT` (a coordinator can force it with
+`--override`, which is recorded as `released_by_override`).
 
 ```bash
-filigree list --status=in_progress --assignee <missing-agent>
-filigree release <issue-id>                         # free the claim
-filigree add-comment <issue-id> "Released: previous agent did not complete"
+filigree stale-claims                               # claims whose lease lapsed
+filigree reclaim <issue-id> --assignee <you> \
+  --expected-assignee <missing-agent> --reason "missed heartbeat"
+filigree add-comment <issue-id> "Reclaimed: previous agent did not complete"
+```
+
+To keep your own claims from going stale, heartbeat long-running work and
+drop everything you still hold at session end. Heartbeat is holder-checked:
+only the holder (`--actor` / MCP `actor`, required) can extend its own lease.
+
+```bash
+filigree --actor <you> heartbeat-work <issue-id>    # MCP: work_heartbeat
+filigree --actor <you> release-my-claims            # MCP: work_release_mine
 ```
 
 ### CONFLICT Responses
 
 A `start-work` (or `claim`) call that loses the race returns
-`{error: ..., code: "CONFLICT", details: {current_assignee: "..."}}` and
-exits with code 4. This is distinct from operational errors (exit 1) so
-automated callers can retry against a different issue without escalating.
+`{error: ..., code: "CONFLICT", details: {issue_id: "...", observed: "<holder>", expected: "<you>"}}`
+and exits 1, like every other error envelope. Branch on `code`, not the exit
+status: `CONFLICT` means retry against a different issue without escalating.
 
 ## Session Resumption
 

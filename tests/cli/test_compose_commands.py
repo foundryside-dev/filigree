@@ -61,6 +61,30 @@ class TestStartWorkCli:
             "expected": "agent-challenger",
         }
 
+    def test_documented_conflict_contract_matches_the_cli(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        """Task 0.9 (LX-14): the skill documented CONFLICT as "CLI exit 4" with
+        ``details.current_assignee``. Pin the prose to the live behaviour: a
+        lost race exits 1 with ``details`` keyed ``issue_id/observed/expected``."""
+        from importlib.resources import files
+
+        runner, _ = cli_in_project
+        issue_id = _extract_id(runner.invoke(cli, ["create", "Contested"]).output)
+        assert runner.invoke(cli, ["start-work", issue_id, "--assignee", "agent-1"]).exit_code == 0
+
+        result = runner.invoke(cli, ["start-work", issue_id, "--assignee", "agent-2", "--json"])
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["code"] == "CONFLICT"
+        assert set(data["details"]) == {"issue_id", "observed", "expected"}
+
+        skill = files("filigree") / "skills" / "filigree-workflow"
+        coordination = (skill / "references" / "team-coordination.md").read_text(encoding="utf-8")
+        conflict_section = coordination.split("### CONFLICT Responses", 1)[1].split("\n## ", 1)[0]
+        assert "observed:" in conflict_section
+        assert "expected:" in conflict_section
+        assert "exits 1" in conflict_section
+        assert "CLI exit 1" in (skill / "SKILL.md").read_text(encoding="utf-8")
+
     def test_happy_path_with_target_status(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         """--target-status lets caller override the canonical wip status."""
         runner, _ = cli_in_project

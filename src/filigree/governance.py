@@ -1,38 +1,37 @@
-"""Transport-neutral Legis closure-gate policy (B5).
+"""Transport-neutral closure-gate policy (B5).
 
 This module owns the *decision* — which issues are governed and what to do
-when Legis cannot confirm a binding — while staying free of any transport
-concern. Every close surface (HTTP routes, MCP tools, CLI) calls
-:func:`evaluate_closure_gate` and renders the resulting :class:`GateDecision`
-in its own idiom, so the gate cannot be bypassed by closing through a
-different surface. The data layer is never involved in the network call.
+about them — while staying free of any transport concern. Every close surface
+(HTTP routes, MCP tools, CLI) calls :func:`evaluate_closure_gate` and renders
+the resulting :class:`GateDecision` in its own idiom, so the gate cannot be
+bypassed by closing through a different surface.
 
 DECISIONS (see the B5 design notes):
 
 - **DECISION 1A — governed = signature present.** An issue is governed when
   it has >=1 entity-association carrying a non-null Legis ``signature`` (the
-  B1 column). Only governed issues consult Legis; ungoverned closes make no
-  network call.
-- **DECISION 2 — fail-closed for governed.** When Legis is disabled (404)
-  or unreachable (timeout/connection error), a *governed* close is blocked
-  (``UNAVAILABLE``) so an operator cannot dodge the gate by taking Legis
-  offline. A 500 (tampered ledger) is ``INTEGRITY_FAILURE``. A 2xx that
-  violates the wire contract (no ``allowed=true``) is ``CONTRACT_VIOLATION``
-  — a *per-issue* fail-closed verdict, NOT ``UNAVAILABLE``: Legis answered, so
-  it is reachable, and one bad answer must not short-circuit a whole cascade
-  batch. With ``LEGIS_URL`` unset, governance is OFF entirely and every close
-  proceeds ("invisible until wanted").
+  B1 column). Ungoverned closes always proceed.
+- **DECISION 2 (SUPERSEDED, 3.4.0) — Legis is retired; the gate no longer
+  consults it.** The original policy failed closed when Legis was unreachable,
+  from a synchronous 5 s urllib probe on the event loop; that wedged every
+  governed close once Legis was archived (M-7, HTTP F1). With ``LEGIS_URL`` set
+  a *governed* close now PROCEEDs with a ``governance_provider_archived``
+  warning (on the decision, and as a ``governance_warning`` event on the issue)
+  and **no network call is made**. With ``LEGIS_URL`` unset governance is OFF
+  entirely. The local checks are unchanged and still fail closed: a drifted
+  Legis sign-off snapshot (``STALE``) and Loomweave current-code drift
+  (``STALE``). The module is deleted in 4.0.
 """
 
 from __future__ import annotations
 
 import logging
+import sqlite3
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any, Protocol
 
 from filigree import legis_client
-from filigree.legis_client import LegisGateResult, LegisGateStatus
 from filigree.registry import RegistryUnavailableError, RegistryVersionMismatchError, is_loomweave_backend_unreachable
 from filigree.types.core import LineageEvent, make_issue_id
 
@@ -88,6 +87,11 @@ class GateDecision:
     # channel every close surface renders). Advisory only: never affects
     # ``allowed`` or the outcome — an orphaned binding stays freshness UNKNOWN.
     lineage_hints: dict[str, LineageEvent] = field(default_factory=dict)
+    # Advisory messages that ride on a verdict without changing it. Like
+    # ``lineage_hints`` this is data only: a PROCEED keeps ``reason`` empty (the
+    # "why not allowed" channel) and carries its warnings here. Today the only
+    # producer is :data:`GOVERNANCE_PROVIDER_ARCHIVED_WARNING`.
+    warnings: list[str] = field(default_factory=list)
 
     @property
     def allowed(self) -> bool:
@@ -95,6 +99,10 @@ class GateDecision:
 
 
 _PROCEED = GateDecision(GateOutcome.PROCEED)
+
+GOVERNANCE_PROVIDER_ARCHIVED_WARNING = (
+    "governance_provider_archived: LEGIS_URL is set but Legis is retired; the close proceeded without an external gate"
+)
 
 
 class _AssocReader(Protocol):
@@ -111,11 +119,6 @@ class _StatusGateReader(_AssocReader, Protocol):
     # Both methods exist on FiligreeDB.
     def get_issue(self, issue_id: Any) -> Any: ...
     def _resolve_status_category(self, issue_type: str, status: str) -> Any: ...
-
-
-def check_closure_gate(issue_id: str) -> LegisGateResult:
-    """Indirection point over the Legis client (monkeypatched in tests)."""
-    return legis_client.check_closure_gate(issue_id)
 
 
 def _signed_row_is_stale(row: Any) -> bool:
@@ -359,41 +362,48 @@ def _evaluate_current_drift(db: Any, issue_id: str, signed_rows: list[Any], *, l
     return _DriftCheck(None, False, lineage_hints, lineage_unavailable=lineage_unavailable)
 
 
+def _record_archived_provider_warning(db: Any, issue_id: str) -> None:
+    """Best-effort ``governance_warning`` event for a close that proceeded ungated.
+
+    The audit row must never turn a PROCEED into a failure, so a database error
+    is logged and swallowed. A caller already inside a transaction owns its
+    lifecycle: the event joins it rather than starting a nested one. Test
+    doubles without the recorder (anything that is not a ``FiligreeDB``) skip it.
+    """
+    recorder = getattr(db, "record_governance_warning", None)
+    if recorder is None:
+        return
+    try:
+        recorder(make_issue_id(issue_id), GOVERNANCE_PROVIDER_ARCHIVED_WARNING, _skip_begin=bool(db.conn.in_transaction))
+    except sqlite3.Error:
+        logger.warning("Failed to record governance_warning event for issue %s", issue_id, exc_info=True)
+
+
 def evaluate_closure_gate(
     db: _AssocReader,
     issue_id: str,
     *,
-    legis_known_down: bool = False,
     loomweave_known_down: bool = False,
 ) -> GateDecision:
     """Decide whether *issue_id* may be closed.
 
-    Short-circuits to ``PROCEED`` when governance is off, and again for
-    ungoverned issues — only a governed issue triggers a network call. A
-    *governed* issue whose Legis sign-off has drifted (any signed binding's
-    content moved on since it was signed) fails closed as ``STALE`` with no
-    network call: Filigree cannot treat a sign-off over old content as covering
-    new content, and the issue-id-only gate call cannot convey the drift to
-    Legis — only a fresh Legis sign-off (a signed write) clears it (v27).
+    Short-circuits to ``PROCEED`` when governance is off (``LEGIS_URL`` unset),
+    and again for ungoverned issues. A *governed* issue whose Legis sign-off has
+    drifted (any signed binding's content moved on since it was signed) fails
+    closed as ``STALE``: Filigree cannot treat a sign-off over old content as
+    covering new content (v27). The Loomweave current-code drift check (RED-1)
+    runs after that and also fails closed as ``STALE`` on a real mismatch.
 
-    ``legis_known_down`` lets a batch caller suppress the per-issue Legis
-    round-trip once an earlier issue in the same sweep already proved Legis
-    unreachable (bounding a down/slow Legis to one timeout per batch). It is
-    applied **only** at the point a network call would otherwise happen — after
-    the governance-off, ungoverned, and stale short-circuits — so an ungoverned
-    or governance-off issue later in the batch still PROCEEDs and a stale one
-    still reports ``STALE``. A governed, non-stale issue fails closed as
-    ``UNAVAILABLE`` (DECISION 2) with no further network call.
+    Legis is retired, so a governed issue that clears those local checks is NOT
+    sent to Legis: it PROCEEDs with a
+    :data:`GOVERNANCE_PROVIDER_ARCHIVED_WARNING` on the decision and a
+    ``governance_warning`` event on the issue. No network call is ever made.
 
-    ``loomweave_known_down`` is the same bound for the RED-1 drift probe: once
+    ``loomweave_known_down`` bounds the RED-1 drift probe for batch callers: once
     an earlier issue in the batch proved Loomweave down, the per-issue resolver
-    call (and its retry budget) is skipped. Unlike Legis it is **enrich-only**:
-    the issue still gets its own Legis verdict — only the drift probe is skipped,
-    freshness is UNKNOWN (logged), and the resulting decision reports
-    ``loomweave_unavailable=True`` so the caller can keep the flag set. It is
-    applied inside the drift helper at the resolver call — after the
-    ungoverned and snapshot-STALE short-circuits, before the
-    ``legis_known_down`` short-circuit — so a drifted sign-off is never masked.
+    call (and its retry budget) is skipped. The check is **enrich-only**: the
+    issue's freshness is UNKNOWN (logged) and the resulting decision reports
+    ``loomweave_unavailable=True`` so the caller can keep the flag set.
     """
     if not legis_client.is_configured():
         return _PROCEED
@@ -403,43 +413,32 @@ def evaluate_closure_gate(
     # masquerade as ungoverned (the data layer also normalises "" -> NULL).
     signed_rows = [row for row in rows if row.get("signature") is not None]
     if not signed_rows:
-        return _PROCEED  # ungoverned — no network call (DECISION 1A)
+        return _PROCEED  # ungoverned
     if any(_signed_row_is_stale(row) for row in signed_rows):
-        # Fail closed locally — do NOT consult Legis (it is asked only issue_id
-        # and would answer for the stale snapshot it last saw).
         return GateDecision(GateOutcome.STALE, "entity content drifted since the Legis sign-off; awaiting re-sign")
     check = _evaluate_current_drift(db, str(issue_id), signed_rows, loomweave_known_down=loomweave_known_down)
     if check.decision is not None:
         # Current code has moved on since the binding was attached — fail closed
-        # as STALE, like the sign-off-snapshot drift above. This runs BEFORE the
-        # legis_known_down short-circuit (same load-bearing ordering as the
-        # snapshot check): a drifted binding must report STALE, never be masked
-        # as a transient UNAVAILABLE. A Loomweave outage does NOT reach here as a
-        # block — it degrades to UNKNOWN inside the helper (enrich-only).
-        # loomweave_known_down is likewise applied INSIDE the helper, at the
-        # resolver call — after the ungoverned and snapshot-STALE short-circuits,
-        # before the legis_known_down short-circuit. The advisory
-        # ``lineage_unavailable`` still rides on a STALE verdict (the lineage
-        # fallback can be unreachable while the drift comparison succeeded).
+        # as STALE, like the sign-off-snapshot drift above. A Loomweave outage
+        # does NOT reach here as a block — it degrades to UNKNOWN inside the
+        # helper (enrich-only). The advisory ``lineage_unavailable`` still rides
+        # on a STALE verdict (the lineage fallback can be unreachable while the
+        # drift comparison succeeded).
         stale = check.decision
         if check.lineage_unavailable:
             stale = replace(stale, lineage_unavailable=True)
         return _with_lineage_hints(stale, check.lineage_hints)
-    if legis_known_down:
-        # A governed, non-stale issue needs a Legis round-trip, but a prior issue
-        # in this batch already proved Legis unreachable — fail closed without
-        # re-incurring the timeout (DECISION 2).
-        decision = GateDecision(GateOutcome.UNAVAILABLE, "Legis unreachable earlier in this batch")
-    else:
-        decision = _map_result(check_closure_gate(str(issue_id)))
-    # Stamp the advisory flags / rename hints on a copy — ``_PROCEED`` is a
-    # shared singleton.
-    if check.loomweave_unavailable or check.lineage_unavailable:
-        decision = replace(
-            decision,
-            loomweave_unavailable=decision.loomweave_unavailable or check.loomweave_unavailable,
-            lineage_unavailable=decision.lineage_unavailable or check.lineage_unavailable,
-        )
+    # Legis is retired: proceed with a warning instead of consulting it. Stamp
+    # the advisory flags / rename hints on a copy — ``_PROCEED`` is a shared
+    # singleton.
+    _record_archived_provider_warning(db, str(issue_id))
+    logger.warning("closure-gate: %s (issue %s)", GOVERNANCE_PROVIDER_ARCHIVED_WARNING, issue_id)
+    decision = replace(
+        _PROCEED,
+        warnings=[GOVERNANCE_PROVIDER_ARCHIVED_WARNING],
+        loomweave_unavailable=check.loomweave_unavailable,
+        lineage_unavailable=check.lineage_unavailable,
+    )
     return _with_lineage_hints(decision, check.lineage_hints)
 
 
@@ -466,7 +465,7 @@ def evaluate_status_change_gate(db: _StatusGateReader, issue_id: str, requested_
       — the gate must not mask or pre-empt that error).
 
     Otherwise it delegates to :func:`evaluate_closure_gate`, which applies the
-    governed-ness short-circuit and the fail-closed Legis policy.
+    governed-ness short-circuit and the retired-Legis warning policy.
     """
     if requested_status is None or not legis_client.is_configured():
         return _PROCEED
@@ -479,24 +478,3 @@ def evaluate_status_change_gate(db: _StatusGateReader, issue_id: str, requested_
     except (KeyError, ValueError):
         return _PROCEED  # unknown issue/status — let the write validator reject it
     return evaluate_closure_gate(db, issue_id)
-
-
-def _map_result(result: LegisGateResult) -> GateDecision:
-    status = result.status
-    if status in (LegisGateStatus.ALLOWED, LegisGateStatus.NOT_CONFIGURED):
-        return _PROCEED
-    if status is LegisGateStatus.BLOCKED:
-        return GateDecision(GateOutcome.BLOCKED, result.reason or "Closure blocked by Legis governance")
-    if status is LegisGateStatus.INTEGRITY_FAILURE:
-        return GateDecision(GateOutcome.INTEGRITY_FAILURE, result.reason or "Legis binding ledger integrity failure")
-    if status is LegisGateStatus.INVALID_RESPONSE:
-        # Legis answered, but the answer broke the wire contract. Per-issue
-        # fail-closed (CONTRACT_VIOLATION), NOT UNAVAILABLE: Legis is reachable, so
-        # this must not flip the batch's legis_known_down short-circuit and starve
-        # the remaining issues of their own gate evaluation.
-        return GateDecision(
-            GateOutcome.CONTRACT_VIOLATION,
-            result.reason or "Legis returned a contract-violating response",
-        )
-    # NOT_ENABLED or UNREACHABLE for a governed issue → fail closed (DECISION 2).
-    return GateDecision(GateOutcome.UNAVAILABLE, result.reason or "Governance backend unavailable")

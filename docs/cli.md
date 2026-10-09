@@ -241,7 +241,7 @@ filigree close <id1> <id2> <id3>                # Close multiple at once
 filigree close <id> --reason="Fixed in commit abc123"
 filigree reopen <id>
 filigree reopen <id1> <id2>                     # Reopen multiple at once
-filigree undo <id>                          # Undo last reversible action
+filigree undo <id> --expected-event-id <n>  # Undo last reversible action (n from `filigree events <id>`)
 ```
 
 `update --json` returns the full issue projection. Soft workflow enforcement
@@ -318,10 +318,16 @@ before closure. Reopen clears `closed_at` and stale close-only fields such as
 ### `undo`
 
 Undo the most recent reversible action on an issue. Covers status, title, priority, assignee, description, notes, claims, and dependency changes.
+`--expected-event-id` is required: the id of the event to reverse (from `filigree events <id>`). If it is not the
+newest reversible event the command returns `CONFLICT` with `details.latest_event_id` and changes nothing, so a
+retried undo never reverses a second event. If another actor holds a live claim on the issue the command returns
+`CONFLICT` with `details.holder` unless `--override`. Nothing left to undo is a no-op (exit 0).
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `id` | string | Issue ID (positional) |
+| `--expected-event-id` | integer | Id of the event to reverse (required) |
+| `--override` | flag | Coordinator undo of an issue whose live claim another actor holds |
 
 ## Listing and Search
 
@@ -504,19 +510,24 @@ Claim the highest-priority ready issue.
 | `--priority-min` | 0-4 | Minimum priority (0=critical) |
 | `--priority-max` | 0-4 | Maximum priority |
 
+Retry-safe: if the assignee claimed an issue in the last 60 seconds and still holds it, that issue is returned
+(`Already holding …`, `already_holding: true` in `--json`) instead of a second claim. An older held claim does not
+block new work.
+
 ### `release`
 
-Release a claimed issue by clearing its assignee without changing status. By default this is strict: releasing an
-unassigned issue returns a conflict. Use `--if-held` for idempotent cleanup flows; it no-ops when the issue is
-already unassigned and only clears a live claim held by `--expected-assignee`, or by the global `--actor` when no
-expected assignee is provided. If another actor holds the claim, the command returns `CONFLICT`; do not treat that
-as a cleanup no-op.
+Release a claim you hold by clearing its assignee. Holder-checked: the global `--actor` must hold the claim; if
+another actor holds it the command returns `CONFLICT` and leaves the claim alone. `--expected-assignee` is an extra
+compare-and-swap guard, never authorization. Releasing an issue nobody holds is an idempotent no-op (exit 0;
+`--json` prints `{"result": "no_op", "reason": "not_claimed"}`). To take over a peer's stale claim use `reclaim`;
+`--override` is the coordinator release, recorded as `released_by_override`. (`--if-held` was removed in 3.4.0:
+its behaviour is now the default.)
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `id` | string | Issue ID (positional) |
-| `--if-held` | flag | Idempotent release-if-held mode |
-| `--expected-assignee` | string | Expected current assignee for `--if-held` coordinator flows |
+| `--override` | flag | Coordinator release of a claim `--actor` does not hold |
+| `--expected-assignee` | string | Extra CAS guard on the current holder; never authorizes a non-holder |
 | `--reason` | string | Audit reason recorded on the release event |
 
 ### `release-my-claims`
@@ -536,13 +547,16 @@ scratch or review work.
 
 ### `heartbeat-work`
 
-Refresh claim liveness for a claimed issue. By default the global `--actor` is
-treated as the expected holder; coordinators can pass `--expected-assignee`.
+Refresh claim liveness for a claimed issue. Holder-checked: the global `--actor`
+must hold the claim, or the command returns `CONFLICT`. `--expected-assignee` is
+an extra compare-and-swap guard, never authorization. `--override` is the
+coordinator refresh, recorded as `heartbeat_by_override`.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `id` | string | Issue ID (positional) |
-| `--expected-assignee` | string | Expected current assignee |
+| `--expected-assignee` | string | Extra compare-and-swap guard on the current assignee |
+| `--override` | flag | Coordinator refresh of a claim the `--actor` does not hold |
 | `--lease-hours` | integer | Lease duration from this heartbeat (default 48) |
 
 ### `stale-claims`
@@ -589,6 +603,8 @@ The working status is type-specific (the unique wip-category status reachable in
 Claim AND transition the highest-priority ready issue. Returns `{status: "empty", reason: ...}` when no matching issue exists.
 
 Candidates that are ready but not single-hop startable (e.g. `triage` bugs) are **skipped**, so the command returns the next startable issue rather than failing. Pass `--advance` to make such candidates startable via the multi-hop soft walk instead of skipping them.
+
+Retry-safe: if the assignee started an issue in the last 60 seconds and still holds it in progress, that issue is returned (`Already holding …`, `already_holding: true` in `--json`) instead of a second one. An older held claim does not block new work.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -1170,6 +1186,43 @@ Update multiple findings in one call.
 | `--status` | string | New status (required) |
 
 Records the global `--actor` in each updated finding's `updated_by` field.
+
+### `finding export`
+
+Archive (and optionally drop) stored Wardline telemetry findings (Stage 0).
+Selects every finding whose `metadata.wardline.kind` is a known non-defect kind
+(`fact`, `classification`, `metric`, `suggestion`), on any path and at any
+status. This is the same rule the scan ingest rejects on. Exceptions and caveats:
+
+- A finding with a missing, corrupt, or unknown kind is never selected
+  (FIL-1), on every path.
+- The `<engine>` pseudo-path is selected by kind like any other path. Wardline
+  emits real defects there (for example `WLN-ENGINE-LINELESS-DEFECT`), and they
+  are never selected.
+- A finding linked to an issue (`issue_id` set) is never selected, exported,
+  or deleted. These rows are counted as `skipped_linked`.
+
+Each row is written with its file record as one
+JSONL line (`{"finding": {...}, "file": {...}}`, ordered by finding id). A
+sha256sum-format `<out>.sha256` sidecar is written next to it.
+
+```bash
+filigree finding export --dry-run --json   # count only; writes nothing
+filigree finding export                    # write archive + sidecar; delete nothing
+filigree finding export --delete           # then drop the exported rows
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `--kind` | enum | `non-defect` (the only, default, selection) |
+| `--out` | path | Archive path (default `archive/telemetry-3x.jsonl` under the project root) |
+| `--dry-run` | flag | Count the rows that would be exported; write nothing |
+| `--delete` | flag | After the archive is fsynced, delete the exported rows in one transaction, plus any file record left with no findings and no issue associations |
+| `--force` | flag | Overwrite an existing archive |
+
+Output (`--json`): `{selected, exported, deleted, deleted_file_records,
+skipped_linked, out, sha256, dry_run}`. An existing archive without `--force` is `CONFLICT`. A
+write or fsync failure is `IO`, and nothing is deleted.
 
 ### Annotations
 

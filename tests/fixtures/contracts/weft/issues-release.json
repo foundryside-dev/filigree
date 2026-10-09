@@ -7,15 +7,15 @@
       "docs/plans/2026-04-24-2.0-federation-work-package.md"
     ],
     "pinning_discipline": "shape reference; see docs/federation/contracts.md",
-    "updated": "2026-05-07",
+    "updated": "2026-10-09",
     "endpoint": "POST /api/weft/issues/{issue_id}/release",
     "status": "live as of Phase C3.",
     "relation_to_classic": "Same request shape; response shape changes from IssueDict to IssueWeft."
   },
   "shape_decl": {
-    "request_type": "{actor?: str, if_held?: bool, expected_assignee?: str, reason?: str}",
+    "request_type": "{actor?: str, if_held?: bool, expected_assignee?: str, reason?: str, override?: bool}",
     "response_type": "IssueWeft",
-    "rationale": "Releases a claim. 409 CONFLICT when not claimable; 404 NOT_FOUND when the issue id does not exist. Optional if_held mode is idempotent for unassigned issues and only clears the expected holder."
+    "rationale": "Releases a claim. Holder-checked: actor must be the live assignee; any other holder is 409 CONFLICT and the claim is left alone. expected_assignee is an extra compare-and-swap guard (the holder must also equal it), never authorization. override: true is the only coordinator bypass (recorded as a released_by_override event; expected_assignee is still enforced). An issue nobody holds is idempotent: 200 with the unchanged issue. if_held is still accepted for wire compatibility but no longer changes behaviour (holder-checked release is the only mode). 404 NOT_FOUND when the issue id does not exist."
   },
   "examples": [
     {

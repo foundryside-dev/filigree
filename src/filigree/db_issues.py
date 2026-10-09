@@ -15,6 +15,8 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 
+from filigree import commit_reachability
+from filigree.commit_reachability import ReachabilityCheck
 from filigree.db_base import (
     AGE_BUCKETS,
     DBMixinProtocol,
@@ -45,6 +47,7 @@ from filigree.types.core import (
     make_issue_id,
     make_loomweave_entity_id,
 )
+from filigree.types.events import EventType
 from filigree.types.files import DeleteIssueResult
 from filigree.validation import sanitize_actor
 
@@ -66,6 +69,12 @@ logger = logging.getLogger(__name__)
 
 _REOPEN_CLEAR_FIELDS = frozenset({"close_reason"})
 DEFAULT_CLAIM_LEASE_HOURS = 48
+# Final review I3: without a matching ``client_request_id``, claim-next /
+# start-next hand back an already-held claim only when that claim was made this
+# recently (a timed-out retry). Older held claims are not "your next work" --
+# with one actor shared across sessions they are another session's in-progress
+# issue -- so the call claims the next ready issue instead.
+HELD_CLAIM_RETRY_WINDOW_SECONDS = 60
 
 
 class _StartCandidateUnclaimableError(Exception):
@@ -152,6 +161,33 @@ def _fields_for_reopen(fields: dict[str, Any]) -> dict[str, Any]:
 def _claim_expiry(now: str, lease_hours: int = DEFAULT_CLAIM_LEASE_HOURS) -> str:
     """Return the expiry timestamp for a claim heartbeat."""
     return (datetime.fromisoformat(str(now)) + timedelta(hours=lease_hours)).isoformat()
+
+
+_CLIENT_REQUEST_ID_MAX_LEN = 200
+
+
+def _validate_client_request_id(value: object) -> str | None:
+    """Validate an optional caller-chosen idempotency key for claim-next verbs."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        msg = "client_request_id must be a non-empty string"
+        raise ValueError(msg)
+    if len(value) > _CLIENT_REQUEST_ID_MAX_LEN:
+        msg = f"client_request_id must be at most {_CLIENT_REQUEST_ID_MAX_LEN} characters"
+        raise ValueError(msg)
+    return value
+
+
+def _client_request_comment(client_request_id: str | None) -> str:
+    """Encode a ``client_request_id`` as the ``claimed`` event's comment payload.
+
+    Stored in the event (no schema change); the encoding is deterministic so
+    a replay lookup can match on string equality.
+    """
+    if client_request_id is None:
+        return ""
+    return json.dumps({"client_request_id": client_request_id})
 
 
 def _parse_issue_timestamp(raw: object) -> datetime | None:
@@ -802,6 +838,7 @@ class IssuesMixin(DBMixinProtocol):
         mode: TransitionMode = TransitionMode.FORWARD,
         claim_commit: str | None = None,
         close_commit: str | None = None,
+        _close_commit_check: ReachabilityCheck | None = None,
         _skip_begin: bool = False,
     ) -> Issue:
         """Update issue fields, workflow status, assignment, and parent links.
@@ -842,8 +879,15 @@ class IssuesMixin(DBMixinProtocol):
             claim_commit: Opaque ``branch@sha`` commit anchor (warpline seam,
                 contract B), stored verbatim wherever ``claimed_at`` is set; NULL
                 otherwise. Filigree never parses it.
-            close_commit: Opaque ``branch@sha`` commit anchor stored verbatim
-                wherever ``closed_at`` is set (done-entry); NULL otherwise.
+            close_commit: ``branch@sha`` commit anchor stored verbatim
+                wherever ``closed_at`` is set (done-entry); NULL otherwise. The
+                stored value is never rewritten; ``close_issue`` reads the sha
+                out of it only for its advisory reachability check.
+            _close_commit_check: Private (``close_issue`` only). The
+                reachability verdict for ``close_commit``, computed by the
+                caller *outside* the write lock; recorded as a
+                ``close_commit_checked`` event in this transaction when the
+                write enters a done state with a commit anchor.
 
         Returns:
             The freshly loaded issue. Soft transition data warnings are also
@@ -1037,6 +1081,18 @@ class IssuesMixin(DBMixinProtocol):
                 # (NULL when none supplied -> warpline falls back to the timestamp).
                 updates.append("close_commit = ?")
                 params.append(close_commit)
+                if close_commit is not None and _close_commit_check is not None:
+                    # Task 0.6: the reachability verdict rides on the close as
+                    # its own non-reversible event (no DDL): new_value is
+                    # true/false/unknown, old_value the anchor as stored.
+                    self._record_event(
+                        issue_id,
+                        "close_commit_checked",
+                        actor=actor,
+                        old_value=close_commit,
+                        new_value=_close_commit_check.stored_value,
+                        comment=f"{_close_commit_check.sha or '-'} vs {_close_commit_check.ref}",
+                    )
             else:
                 # Clear closed_at when leaving a done-category state
                 old_cat = self.templates.get_category(current.type, current.status)
@@ -1192,6 +1248,7 @@ class IssuesMixin(DBMixinProtocol):
         expected_assignee: str | None = None,
         force: bool = False,
         commit: str | None = None,
+        _close_commit_check: ReachabilityCheck | None = None,
         _skip_begin: bool = False,
     ) -> Issue:
         """Close an issue.
@@ -1214,9 +1271,22 @@ class IssuesMixin(DBMixinProtocol):
         just because that's the only reachable done-state).
 
         ``commit`` is an opaque ``branch@sha`` commit anchor (warpline seam,
-        contract B) persisted as ``close_commit`` when the issue enters the
-        done-category state; NULL when omitted. Filigree stores it verbatim and
-        never parses it.
+        contract B) persisted verbatim as ``close_commit`` when the issue enters
+        the done-category state; NULL when omitted.
+
+        When ``commit`` is given, the sha after its last ``@`` is checked against
+        ``origin/<integration_ref>`` (config.json ``integration_ref``, default
+        ``main``) before the write lock is taken -- see
+        :mod:`filigree.commit_reachability`. The verdict is stored as a
+        ``close_commit_checked`` event; a definite "not reachable" adds a
+        ``commit_not_reachable_from_integration_ref`` entry to the returned
+        issue's transient ``close_warnings``. The check never blocks the close.
+
+        The check runs git (up to ~10 s each for fetch and merge-base), so an
+        ``async`` caller must compute it off the event loop with
+        ``await asyncio.to_thread(db.check_close_commit, commit)`` and pass the
+        result as ``_close_commit_check``; ``close_issue`` then does not run git.
+        Synchronous callers (CLI) leave it ``None`` and the check runs inline.
         """
         if fields is not None and not isinstance(fields, dict):
             msg = "fields must be a dict"
@@ -1257,8 +1327,14 @@ class IssuesMixin(DBMixinProtocol):
         if reason:
             update_fields["close_reason"] = reason
 
+        check = _close_commit_check
+        if commit is not None and check is None:
+            check = self.check_close_commit(commit)
+        elif commit is None:
+            check = None
+
         mode = TransitionMode.BACKWARD if force else TransitionMode.FORWARD
-        return self.update_issue(
+        closed = self.update_issue(
             issue_id,
             status=done_status,
             fields=update_fields or None,
@@ -1266,8 +1342,38 @@ class IssuesMixin(DBMixinProtocol):
             expected_assignee=expected_assignee,
             mode=mode,
             close_commit=commit,
+            _close_commit_check=check,
             _skip_begin=_skip_begin,
         )
+        if check is not None and check.warning is not None:
+            closed.close_warnings.append(check.warning)
+        return closed
+
+    def close_commit_check_applies(self, issue_id: str) -> bool:
+        """Whether a close of *issue_id* would reach the commit check at all.
+
+        False when ``close_issue`` is going to refuse before checking: a
+        foreign prefix, a missing issue, or one already in a done state. Async
+        handlers call this (a cheap read, no transaction) before awaiting the
+        git check so a 404 / already-closed answer never waits on git.
+        """
+        try:
+            self._check_id_prefix(issue_id)
+            issue = self.get_issue(issue_id)
+        except (KeyError, ValueError):
+            return False
+        return self._resolve_status_category(issue.type, issue.status) != "done"
+
+    def check_close_commit(self, commit: str) -> ReachabilityCheck:
+        """Reachability verdict for a close anchor (Task 0.6). Blocking; never raises.
+
+        Touches no database connection (only ``config.json`` and git), so async
+        handlers may run it via ``asyncio.to_thread`` without borrowing a
+        worker-thread connection.
+        """
+        from filigree.core import read_integration_ref
+
+        return commit_reachability.check_commit_reachable(self.project_root, commit, read_integration_ref(self.meta_dir))
 
     @_retry_busy()
     @_in_immediate_tx("reopen_issue")
@@ -1518,7 +1624,16 @@ class IssuesMixin(DBMixinProtocol):
 
     @_retry_busy()
     @_in_immediate_tx("claim_issue")
-    def claim_issue(self, issue_id: str, *, assignee: str, actor: str = "", commit: str | None = None, _skip_begin: bool = False) -> Issue:
+    def claim_issue(
+        self,
+        issue_id: str,
+        *,
+        assignee: str,
+        actor: str = "",
+        commit: str | None = None,
+        client_request_id: str | None = None,
+        _skip_begin: bool = False,
+    ) -> Issue:
         """Atomically claim an open/wip-category issue with optimistic locking.
 
         Sets assignee only — does NOT change status. Agent uses update_issue
@@ -1529,7 +1644,7 @@ class IssuesMixin(DBMixinProtocol):
         Uses a single atomic UPDATE with WHERE guard to prevent race conditions
         where two agents try to claim the same issue concurrently.
 
-        Composed callers (``start_work``, ``_claim_next_with_prior``) pass the
+        Composed callers (``start_work``, ``_claim_next_candidate_locked``) pass the
         decorator's ``_skip_begin=True`` so this method runs inside the outer
         IMMEDIATE transaction.
 
@@ -1538,6 +1653,10 @@ class IssuesMixin(DBMixinProtocol):
         fresh claim; like ``claimed_at`` it is set via COALESCE so a same-agent
         re-claim preserves the original anchor. NULL when omitted. Stored
         verbatim, never parsed.
+
+        ``client_request_id`` (passed by ``claim_next`` / ``start_next_work``)
+        is recorded on the ``claimed`` event's comment so a retried call with
+        the same id can find and replay this claim (no schema change).
         """
         # filigree-694f7e9bf8: enforce the same trimmed-identity invariant as
         # create_issue/update_issue. Without normalization, claiming with
@@ -1592,7 +1711,14 @@ class IssuesMixin(DBMixinProtocol):
             msg = f"Cannot claim {issue_id}: status is '{current['status']}', expected open-category state or wip-category handoff state"
             raise ValueError(msg)
 
-        self._record_event(issue_id, "claimed", actor=actor, old_value=old_assignee, new_value=assignee)
+        self._record_event(
+            issue_id,
+            "claimed",
+            actor=actor,
+            old_value=old_assignee,
+            new_value=assignee,
+            comment=_client_request_comment(client_request_id),
+        )
         return self.get_issue(issue_id)
 
     @_retry_busy()
@@ -1601,16 +1727,34 @@ class IssuesMixin(DBMixinProtocol):
         self,
         issue_id: str,
         *,
-        actor: str = "",
-        if_held: bool = False,
+        actor: str,
         expected_assignee: str | None = None,
+        override: bool = False,
         reason: str = "",
         revert_status: bool = True,
-    ) -> Issue:
+    ) -> Issue | None:
         """Release a claimed issue by clearing its assignee.
 
-        Uses compare-and-swap on the observed assignee so a concurrent
-        reassignment between read and UPDATE cannot be silently erased.
+        Holder-checked (MCP F3): without ``override``, ``actor`` must be the
+        live assignee — a mismatch raises ``ClaimConflictError`` and leaves
+        the claim alone. ``expected_assignee`` is a compare-and-swap guard,
+        never authorization: when given it is an *additional* precondition
+        (the live assignee must also equal it), so naming the holder does not
+        let a non-holder release. ``override=True`` is the only way to
+        release a claim ``actor`` does not hold (coordinator); it drops the
+        actor check (``expected_assignee`` is still enforced) and the release
+        is recorded as a ``released_by_override`` event instead of
+        ``released``.
+
+        Idempotent: an issue nobody holds — already unassigned, or released
+        concurrently between read and write — returns ``None`` (the surfaces
+        answer ``{"result": "no_op", "reason": "not_claimed"}``), never a
+        conflict. A done-category issue's assignee is closure audit trail, not
+        a claim, so releasing it is refused with ``ValueError``.
+
+        The UPDATE is a compare-and-swap on the observed assignee so a
+        concurrent reassignment between read and UPDATE cannot be silently
+        erased.
 
         When the issue is in a wip-category status, the call also reverts
         the status to the template-defined open-category predecessor so the
@@ -1624,53 +1768,51 @@ class IssuesMixin(DBMixinProtocol):
         direct predecessor exists. Types with no open-category state get
         no reverse target and stay in wip.
 
-        When ``if_held`` is true, the call is idempotent only for already
-        unassigned issues: those are returned unchanged. Claimed issues are
-        released only when the observed assignee matches ``expected_assignee``;
-        if no expected assignee is provided, ``actor`` is used as the expected
-        holder. A claimed-by-someone-else mismatch raises
-        ``ClaimConflictError`` rather than silently no-oping, so cleanup
-        scripts cannot hide ownership surprises.
-
         Args:
             issue_id: Claimed issue to release. The id prefix must belong to
                 this project for write operations.
-            actor: Audit identity. Also becomes the expected holder for
-                ``if_held=True`` when ``expected_assignee`` is omitted.
-            if_held: Make already-unassigned issues idempotent no-ops, while
-                still rejecting claims held by another assignee.
-            expected_assignee: Optional expected holder for ``if_held=True``.
-                A mismatch raises ``ClaimConflictError``.
-            reason: Audit comment recorded on the ``released`` event.
+            actor: Audit identity; must be the live assignee unless
+                ``override`` is true.
+            expected_assignee: Additional CAS guard on the live assignee. A
+                mismatch raises ``ClaimConflictError`` (with or without
+                ``override``). Never authorizes a non-holder.
+            override: Coordinator release of a claim the actor does not hold.
+            reason: Audit comment recorded on the release event.
             revert_status: When true, move wip-category issues back through the
                 declared reverse/escape transition to the open predecessor, or
                 to the template initial state when no direct predecessor exists.
 
+        Returns:
+            The released issue, or ``None`` when nobody held it (no-op).
+
         Raises:
             KeyError: The issue does not exist.
             WrongProjectError: The write targets an id from another project.
-            ValueError: ``if_held`` is not boolean, the expected holder is blank,
-                the issue is unassigned and ``if_held`` is false, or the claim
-                was concurrently released.
-            ClaimConflictError: The issue is held by someone other than the
-                expected holder, or it is reassigned between read and write.
+            ValueError: ``override``/``revert_status`` is not boolean, the
+                actor is blank without ``override``, or the issue is in a
+                done-category status.
+            ClaimConflictError: The issue is held by someone other than
+                ``actor`` (without ``override``) or ``expected_assignee``, or
+                it is reassigned between read and write.
             InvalidTransitionError: The reverse status transition selected by
                 ``revert_status`` is not declared or is blocked by field gates.
                 ``valid_transitions`` is attached when template context is
                 available.
         """
-        if not isinstance(if_held, bool):
-            msg = "if_held must be a boolean"
+        if not isinstance(override, bool):
+            msg = "override must be a boolean"
             raise ValueError(msg)
         if not isinstance(revert_status, bool):
             msg = "revert_status must be a boolean"
             raise ValueError(msg)
-        expected_holder: str | None = None
-        if if_held:
-            expected_holder = _normalize_assignee(actor if expected_assignee is None else expected_assignee)
-            if not expected_holder:
-                msg = "expected_assignee or actor is required when if_held=True"
-                raise ValueError(msg)
+        explicit_holder = _normalize_assignee(expected_assignee) if expected_assignee is not None else None
+        if expected_assignee is not None and not explicit_holder:
+            msg = "expected_assignee must be a non-empty string"
+            raise ValueError(msg)
+        actor_holder = _normalize_assignee(actor)
+        if not override and not actor_holder:
+            msg = "actor is required to release a claim (or pass override=True as coordinator)"
+            raise ValueError(msg)
         self._check_id_prefix(issue_id)
         row = self.conn.execute("SELECT type, status, assignee, fields FROM issues WHERE id = ?", (issue_id,)).fetchone()
         if row is None:
@@ -1678,18 +1820,20 @@ class IssuesMixin(DBMixinProtocol):
             raise KeyError(msg)
         observed = row["assignee"] or ""
         if not observed:
-            if if_held:
-                return self.get_issue(issue_id)
-            msg = f"Cannot release {issue_id}: no assignee set"
-            raise ValueError(msg)
+            return None
         if self._resolve_status_category(row["type"], row["status"]) == "done":
-            if if_held:
-                return self.get_issue(issue_id)
             msg = f"Cannot release {issue_id}: status '{row['status']}' is done-category; assignee is closure audit trail"
             raise ValueError(msg)
-        if if_held and observed != expected_holder:
-            msg = f"Cannot release {issue_id}: assigned to '{observed}' (expected '{expected_holder}')"
-            raise ClaimConflictError(issue_id, observed=observed, expected=expected_holder or "", message=msg)
+        # expected_assignee is a CAS guard checked first; the actor-is-holder
+        # check is the authorization and only override bypasses it.
+        for expected_holder in (explicit_holder, None if override else actor_holder):
+            if expected_holder is not None and observed != expected_holder:
+                msg = f"Cannot release {issue_id}: assigned to '{observed}' (expected '{expected_holder}')"
+                raise ClaimConflictError(issue_id, observed=observed, expected=expected_holder, message=msg)
+        # Every release that bypassed the holder went through override (the
+        # actor check above is unconditional otherwise); an override by the
+        # holder itself is an ordinary release.
+        released_by_override = observed != actor_holder
 
         target: str | None = None
         if revert_status:
@@ -1763,17 +1907,12 @@ class IssuesMixin(DBMixinProtocol):
                 raise KeyError(msg)
             new_assignee = current["assignee"] or ""
             if not new_assignee:
-                if if_held:
-                    return self.get_issue(issue_id)
-                msg = f"Cannot release {issue_id}: already released"
-                raise ValueError(msg)
-            if if_held:
-                msg = f"Cannot release {issue_id}: assigned to '{new_assignee}' (expected '{expected_holder}')"
-                raise ClaimConflictError(issue_id, observed=new_assignee, expected=expected_holder or "", message=msg)
+                return None
             msg = f"Cannot release {issue_id}: reassigned to '{new_assignee}' (expected '{observed}')"
             raise ClaimConflictError(issue_id, observed=new_assignee, expected=observed, message=msg)
 
-        self._record_event(issue_id, "released", actor=actor, old_value=observed, comment=reason.strip())
+        release_event: EventType = "released_by_override" if released_by_override else "released"
+        self._record_event(issue_id, release_event, actor=actor, old_value=observed, comment=reason.strip())
         if target is not None:
             self._record_event(issue_id, "transition_forced", actor=actor, old_value=row["status"], new_value=target)
             self._record_event(issue_id, "status_changed", actor=actor, old_value=row["status"], new_value=target)
@@ -1793,7 +1932,7 @@ class IssuesMixin(DBMixinProtocol):
 
         Discovers all issues whose ``assignee == actor`` (optionally narrowed
         by ``label`` and/or ``label_prefix``) and releases each via
-        ``release_claim(if_held=True)``. Done-category issues are skipped —
+        the holder-checked ``release_claim``. Done-category issues are skipped —
         a closed issue still carries assignee for audit but isn't an active
         claim, and releasing it would clobber the audit signal that ``X
         closed this``.
@@ -1854,11 +1993,12 @@ class IssuesMixin(DBMixinProtocol):
                 result = self.release_claim(
                     issue.id,
                     actor=normalized_actor,
-                    if_held=True,
                     revert_status=revert_status,
                     reason=reason,
                 )
-                released.append(result)
+                # None: released concurrently since discovery — nothing held.
+                if result is not None:
+                    released.append(result)
             except WrongProjectError:
                 raise
             except (ValueError, KeyError) as exc:
@@ -1878,8 +2018,9 @@ class IssuesMixin(DBMixinProtocol):
         self,
         issue_id: str,
         *,
-        actor: str = "",
+        actor: str,
         expected_assignee: str | None = None,
+        override: bool = False,
         lease_hours: int = DEFAULT_CLAIM_LEASE_HOURS,
     ) -> Issue:
         """Refresh liveness metadata for a claimed, non-done issue.
@@ -1887,24 +2028,51 @@ class IssuesMixin(DBMixinProtocol):
         Updates ``last_heartbeat_at``, ``claim_expires_at``, and ``updated_at``
         only if the assignee observed before the write still owns the issue.
 
+        Holder-checked like ``release_claim`` (final review I5): without
+        ``override``, ``actor`` must be the live assignee — a mismatch raises
+        ``ClaimConflictError``, and a blank actor is refused. Only the holder
+        keeps its own lease alive, so ``get_stale_claims`` -> ``reclaim`` sees
+        abandoned work honestly. ``expected_assignee`` is a compare-and-swap
+        guard, never authorization: when given it is an *additional*
+        precondition. ``override=True`` (coordinator) drops the actor check
+        (``expected_assignee`` is still enforced) and records the refresh as a
+        ``heartbeat_by_override`` event instead of ``heartbeat``.
+
         Args:
             issue_id: Claimed issue to heartbeat. The id prefix must belong to
                 this project for write operations.
-            actor: Audit identity. If ``expected_assignee`` is omitted, this is
-                also accepted as the expected holder.
-            expected_assignee: Optional explicit holder precondition.
+            actor: Audit identity; must be the live assignee unless
+                ``override`` is true.
+            expected_assignee: Additional CAS guard on the live assignee. A
+                mismatch raises ``ClaimConflictError`` (with or without
+                ``override``). Never authorizes a non-holder.
+            override: Coordinator refresh of a claim the actor does not hold.
             lease_hours: Number of hours from now until the refreshed claim
                 expires.
 
         Raises:
             KeyError: The issue does not exist.
             WrongProjectError: The write targets an id from another project.
-            ValueError: The lease value is invalid, the issue is unassigned,
-                the expected holder is blank, or the issue is already done.
-            ClaimConflictError: The issue is held by someone other than the
-                expected holder, or it is reassigned between read and write.
+            ValueError: ``override`` is not boolean, the lease value is
+                invalid, the actor is blank without ``override``,
+                ``expected_assignee`` is blank, the issue is unassigned, or the
+                issue is already done.
+            ClaimConflictError: The issue is held by someone other than
+                ``actor`` (without ``override``) or ``expected_assignee``, or it
+                is reassigned between read and write.
         """
+        if not isinstance(override, bool):
+            msg = "override must be a boolean"
+            raise ValueError(msg)
         _validate_lease_hours(lease_hours)
+        explicit_holder = _normalize_assignee(expected_assignee) if expected_assignee is not None else None
+        if expected_assignee is not None and not explicit_holder:
+            msg = "expected_assignee must be a non-empty string"
+            raise ValueError(msg)
+        actor_holder = _normalize_assignee(actor)
+        if not override and not actor_holder:
+            msg = "actor is required to heartbeat a claim (or pass override=True as coordinator)"
+            raise ValueError(msg)
         self._check_id_prefix(issue_id)
         row = self.conn.execute("SELECT type, status, assignee FROM issues WHERE id = ?", (issue_id,)).fetchone()
         if row is None:
@@ -1914,15 +2082,13 @@ class IssuesMixin(DBMixinProtocol):
         if not observed:
             msg = f"Cannot heartbeat {issue_id}: no assignee set"
             raise ValueError(msg)
-        expected_holder = ""
-        if expected_assignee is not None or actor:
-            expected_holder = _normalize_assignee(actor if expected_assignee is None else expected_assignee)
-            if not expected_holder:
-                msg = "expected_assignee or actor is required"
-                raise ValueError(msg)
-        if expected_holder and observed != expected_holder:
-            msg = f"Cannot heartbeat {issue_id}: assigned to '{observed}' (expected '{expected_holder}')"
-            raise ClaimConflictError(issue_id, observed=observed, expected=expected_holder, message=msg)
+        # expected_assignee is a CAS guard checked first; the actor-is-holder
+        # check is the authorization and only override bypasses it.
+        for expected_holder in (explicit_holder, None if override else actor_holder):
+            if expected_holder is not None and observed != expected_holder:
+                msg = f"Cannot heartbeat {issue_id}: assigned to '{observed}' (expected '{expected_holder}')"
+                raise ClaimConflictError(issue_id, observed=observed, expected=expected_holder, message=msg)
+        heartbeat_by_override = observed != actor_holder
         if self._resolve_status_category(row["type"], row["status"]) == "done":
             msg = f"Cannot heartbeat {issue_id}: status is '{row['status']}'"
             raise ValueError(msg)
@@ -1941,9 +2107,10 @@ class IssuesMixin(DBMixinProtocol):
             new_assignee = current["assignee"] or ""
             msg = f"Cannot heartbeat {issue_id}: reassigned to '{new_assignee}' (expected '{observed}')"
             raise ClaimConflictError(issue_id, observed=new_assignee, expected=observed, message=msg)
+        heartbeat_event: EventType = "heartbeat_by_override" if heartbeat_by_override else "heartbeat"
         self._record_event(
             issue_id,
-            "heartbeat",
+            heartbeat_event,
             actor=actor,
             old_value=observed,
             new_value=claim_expires_at,
@@ -2113,21 +2280,133 @@ class IssuesMixin(DBMixinProtocol):
         priority_min: int | None = None,
         priority_max: int | None = None,
         actor: str = "",
+        client_request_id: str | None = None,
     ) -> Issue | None:
         """Claim the highest-priority ready issue matching filters.
 
         Iterates ready issues sorted by priority and attempts claim_issue()
         on each until one succeeds (handles race conditions with retry).
         Returns None if no matching ready issues exist.
+
+        Retry-safe (MCP F4): if ``assignee`` holds a live (non-done) claim it
+        made within ``HELD_CLAIM_RETRY_WINDOW_SECONDS``, or
+        ``client_request_id`` matches a prior claim by ``assignee`` that it
+        still holds (at any age), that issue is returned with
+        ``already_holding=True`` and nothing is written — a retried call never
+        claims a second issue and strands the first for the lease. An older
+        held claim does not block new work (final review I3: with one actor
+        shared across sessions it is another session's issue).
         """
+        if not assignee or not assignee.strip():
+            msg = "Assignee cannot be empty"
+            raise ValueError(msg)
+        client_request_id = _validate_client_request_id(client_request_id)
+        held = self._find_held_claim(_normalize_assignee(assignee), client_request_id=client_request_id, wip_only=False)
+        if held is not None:
+            return held
         result = self._claim_next_with_prior(
             assignee,
             type_filter=type_filter,
             priority_min=priority_min,
             priority_max=priority_max,
             actor=actor,
+            client_request_id=client_request_id,
         )
         return result[0] if result is not None else None
+
+    @_retry_busy()
+    @_in_immediate_tx("claim_next")
+    def _claim_next_candidate_locked(
+        self,
+        issue_id: str,
+        *,
+        assignee: str,
+        actor: str,
+        client_request_id: str | None,
+        _skip_begin: bool = False,
+    ) -> Issue:
+        """Claim one ``claim_next`` candidate under the writer lock.
+
+        Re-runs the held-claim check after ``BEGIN IMMEDIATE``: a concurrent
+        call by the same assignee may have claimed something between this
+        call's unlocked check and now. If so, that claim is handed back
+        (``already_holding``) instead of claiming a second issue.
+        """
+        held = self._find_held_claim(_normalize_assignee(assignee), client_request_id=client_request_id, wip_only=False)
+        if held is not None:
+            return held
+        return self.claim_issue(
+            issue_id,
+            assignee=assignee,
+            actor=actor,
+            client_request_id=client_request_id,
+            _skip_begin=True,
+        )
+
+    def _find_held_claim(self, assignee: str, *, client_request_id: str | None, wip_only: bool) -> Issue | None:
+        """Return the claim a retried claim-next/start-next call is handed back.
+
+        First a ``client_request_id`` replay: the issue whose ``claimed`` event
+        by ``assignee`` carries that id, if ``assignee`` still holds it (a
+        released or closed issue is no longer "your next work"). A replay
+        always applies, however old the claim. Otherwise the most recently
+        claimed live claim ``assignee`` holds — any non-done one for
+        ``claim_next``, wip-category only (in-progress work) for
+        ``start_next_work`` (``wip_only``) — but only inside the retry window:
+        its latest ``claimed`` event by ``assignee`` (``issues.claimed_at`` when
+        there is none) must be at most ``HELD_CLAIM_RETRY_WINDOW_SECONDS`` old
+        (final review I3). An older held claim is not handed back, so the call
+        claims new work. Read-only; callers re-run it under the writer lock.
+        The returned issue has ``already_holding`` set.
+        """
+        if not assignee:
+            return None
+        rows = self.conn.execute(
+            "SELECT id, type, status, claimed_at FROM issues WHERE assignee = ? ORDER BY claimed_at DESC, id DESC",
+            (assignee,),
+        ).fetchall()
+        live = [r for r in rows if self._resolve_status_category(r["type"], r["status"]) != "done"]
+        chosen: str | None = None
+        if client_request_id is not None and live:
+            live_ids = [r["id"] for r in live]
+            id_ph = ",".join("?" * len(live_ids))
+            replay = self.conn.execute(
+                f"SELECT issue_id FROM events WHERE event_type = 'claimed' AND new_value = ? AND comment = ? "
+                f"AND issue_id IN ({id_ph}) ORDER BY id DESC LIMIT 1",
+                (assignee, _client_request_comment(client_request_id), *live_ids),
+            ).fetchone()
+            if replay is not None:
+                chosen = replay["issue_id"]
+        if chosen is None:
+            for r in live:
+                if not wip_only or self._resolve_status_category(r["type"], r["status"]) == "wip":
+                    # Rows are newest-claim first, so if this one is outside the
+                    # retry window every older one is too.
+                    if self._held_claim_within_retry_window(r["id"], assignee, r["claimed_at"]):
+                        chosen = r["id"]
+                    break
+        if chosen is None:
+            return None
+        held = self.get_issue(chosen)
+        held.already_holding = True
+        return held
+
+    def _held_claim_within_retry_window(self, issue_id: str, assignee: str, claimed_at: object) -> bool:
+        """Whether ``assignee``'s claim on ``issue_id`` is recent enough to be a retry.
+
+        Measured from the latest ``claimed`` event by ``assignee`` on the issue,
+        falling back to ``issues.claimed_at``; an unparseable or missing
+        timestamp is outside the window (claim new work rather than hand over).
+        """
+        event = self.conn.execute(
+            "SELECT created_at FROM events WHERE issue_id = ? AND event_type = 'claimed' AND new_value = ? ORDER BY id DESC LIMIT 1",
+            (issue_id, assignee),
+        ).fetchone()
+        claimed = _parse_issue_timestamp(event["created_at"] if event is not None else claimed_at)
+        now = _parse_issue_timestamp(_now_iso())
+        if claimed is None or now is None:
+            return False
+        return now - claimed <= timedelta(seconds=HELD_CLAIM_RETRY_WINDOW_SECONDS)
 
     def _claim_next_with_prior(
         self,
@@ -2137,6 +2416,7 @@ class IssuesMixin(DBMixinProtocol):
         priority_min: int | None = None,
         priority_max: int | None = None,
         actor: str = "",
+        client_request_id: str | None = None,
         _skip_begin: bool = False,
     ) -> tuple[Issue, str] | None:
         """Internal: claim_next that also returns the candidate's prior assignee.
@@ -2173,7 +2453,13 @@ class IssuesMixin(DBMixinProtocol):
                     raise _ClaimCandidateVanishedError(issue.id)
                 prior_assignee = row["assignee"] or ""
                 try:
-                    claimed = self.claim_issue(issue.id, assignee=assignee, actor=actor or assignee, _skip_begin=_skip_begin)
+                    claimed = self._claim_next_candidate_locked(
+                        issue.id,
+                        assignee=assignee,
+                        actor=actor or assignee,
+                        client_request_id=client_request_id,
+                        _skip_begin=_skip_begin,
+                    )
                 except ClaimConflictError:
                     raise
                 except KeyError as exc:
@@ -2258,9 +2544,20 @@ class IssuesMixin(DBMixinProtocol):
         target_status: str | None = None,
         actor: str = "",
         advance: bool = False,
+        client_request_id: str | None = None,
     ) -> Issue | None:
         """Claim the highest-priority ready issue (filtered) and atomically
         transition it to a working status.
+
+        Retry-safe (MCP F4): if ``assignee`` holds an in-progress
+        (wip-category) claim it made within ``HELD_CLAIM_RETRY_WINDOW_SECONDS``,
+        or ``client_request_id`` matches a prior claim by ``assignee`` that it
+        still holds (at any age), that issue is returned with
+        ``already_holding=True`` and nothing is written — a retried call never
+        claims a second issue and strands the first for the lease. An older
+        held claim does not block new work (final review I3). The held
+        claim is returned regardless of the type/priority filters: the filters
+        choose new work, they do not hide work already in hand.
 
         Candidate discovery (``get_ready``) and per-candidate target
         resolution run lock-free; only the per-candidate claim+transition
@@ -2283,6 +2580,10 @@ class IssuesMixin(DBMixinProtocol):
             msg = "Assignee cannot be empty"
             raise ValueError(msg)
         actor = actor or assignee
+        client_request_id = _validate_client_request_id(client_request_id)
+        held = self._find_held_claim(_normalize_assignee(assignee), client_request_id=client_request_id, wip_only=True)
+        if held is not None:
+            return held
 
         # Discover candidates outside any writer transaction.
         ready = self.get_ready()
@@ -2332,6 +2633,8 @@ class IssuesMixin(DBMixinProtocol):
                     assignee=assignee,
                     target_path=this_path,
                     actor=actor,
+                    client_request_id=client_request_id,
+                    return_held=True,
                 )
             except _StartCandidateUnclaimableError as exc:
                 # Race / status mismatch / deleted — try next candidate.
@@ -2401,8 +2704,16 @@ class IssuesMixin(DBMixinProtocol):
         target_path: list[str],
         actor: str,
         commit: str | None = None,
+        client_request_id: str | None = None,
+        return_held: bool = False,
     ) -> Issue:
         """Private critical section for ``start_work`` / ``start_next_work``.
+
+        ``return_held`` (``start_next_work`` only) re-runs the held-claim check
+        after ``BEGIN IMMEDIATE``: a concurrent call by the same assignee may
+        have started work between this call's unlocked check and now, and that
+        claim is handed back (``already_holding``) instead of starting a
+        second issue (MCP F4).
 
         The ``@_in_immediate_tx`` decorator wraps a tight claim+update
         composite with no template lookups or candidate discovery, so the
@@ -2429,8 +2740,19 @@ class IssuesMixin(DBMixinProtocol):
         only the final hop's warnings would survive, hiding e.g. the missing
         ``severity`` warning from the ``triage -> confirmed`` hop (filigree-406e6b7ee0).
         """
+        if return_held:
+            held = self._find_held_claim(_normalize_assignee(assignee), client_request_id=client_request_id, wip_only=True)
+            if held is not None:
+                return held
         try:
-            result = self.claim_issue(issue_id, assignee=assignee, actor=actor, commit=commit, _skip_begin=True)
+            result = self.claim_issue(
+                issue_id,
+                assignee=assignee,
+                actor=actor,
+                commit=commit,
+                client_request_id=client_request_id,
+                _skip_begin=True,
+            )
         except (ClaimConflictError, KeyError) as exc:
             raise _StartCandidateUnclaimableError(issue_id) from exc
         except ValueError as exc:

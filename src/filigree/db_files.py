@@ -49,7 +49,7 @@ from filigree.types.core import (
     make_issue_id,
     make_loomweave_entity_id,
 )
-from filigree.types.files import ScanIngestResult, WeftReason
+from filigree.types.files import ScanFindingFailure, ScanIngestResult, ScanUnchangedFinding, WeftReason
 
 if TYPE_CHECKING:
     from filigree.registry import ResolvedFile
@@ -71,6 +71,40 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 INGESTED_FILE_ID_KEY = "_filigree_ingested_file_id"
+
+# Per-finding failure codes surfaced in ``ScanIngestResult["failed"]`` (HTTP F2).
+# The wire vocabulary is OPEN (``ScanFindingFailure.code`` is a plain ``str``):
+# a later producer-facing code (e.g. ``KIND_NOT_ACCEPTED``, Task 0.5a) is added
+# without touching a closed enum. Documented members:
+#   OVER_CAP         -- finding dropped by the registry's per-path body cap
+#                       (emitted by the ingest today).
+#   VALIDATION       -- malformed finding. Reserved: ``_validate_scan_findings``
+#                       is fail-closed, so a malformed finding rejects the WHOLE
+#                       batch with HTTP 400 (ErrorCode.VALIDATION) before any write.
+#   SCHEME_MISMATCH  -- fingerprint scheme differs from the store's. Reserved:
+#                       the mismatch is batch-level and its findings are still
+#                       ingested, so it is carried by ``weft_reasons``
+#                       (PDR-0023), not per-finding.
+#   KIND_NOT_ACCEPTED -- Stage 0 telemetry cut: the finding's classified wardline
+#                       kind is not in the project's ``scan_ingest.accept_kinds``
+#                       (emitted by the ingest today; see ``_kind_rejected_indices``).
+#                       The path plays no part: ``<engine>`` rows are classified
+#                       by kind like any other.
+SCAN_FAILURE_OVER_CAP = "OVER_CAP"
+SCAN_FAILURE_KIND_NOT_ACCEPTED = "KIND_NOT_ACCEPTED"
+_KIND_NOT_ACCEPTED_REASON = "telemetry kinds are not work; see Stage 0"
+# A defect-side finding is rejected only when ``defect`` is not in the project's
+# ``scan_ingest.accept_kinds`` (an operator choice), so it is not called telemetry.
+_KIND_NOT_ACCEPTED_DEFECT_REASON = "kind 'defect' is not in this project's scan_ingest.accept_kinds"
+# ``scan_ingest.accept_kinds`` wildcard: accept every kind (the 3.3 behaviour).
+# Read via ``filigree.core.read_scan_ingest_accept_kinds``.
+SCAN_INGEST_ACCEPT_ALL_KINDS = "*"
+# Wardline's pseudo-path for engine-level rows. It carries telemetry (run metrics,
+# analyzer facts) AND real defects (WLN-ENGINE-LINELESS-DEFECT wraps a code defect
+# whose line is unknown; WLN-ENGINE-POLICY-CONFIG, WLN-ENGINE-FINGERPRINT-COLLISION,
+# WLN-L3-MONOTONICITY-VIOLATION), so it is classified by kind like any other path
+# (final-review ruling I1) -- never rejected or exported for its path alone.
+WARDLINE_ENGINE_PSEUDO_PATH = "<engine>"
 
 # ---------------------------------------------------------------------------
 # Constants for file-domain validation
@@ -147,6 +181,82 @@ def _wardline_non_defect_kind_sql(alias: str = "") -> str:
     col = f"{alias}.metadata" if alias else "metadata"
     kinds = ", ".join(f"'{k}'" for k in sorted(NON_DEFECT_WARDLINE_FINDING_KINDS))
     return f"(json_valid({col}) AND json_extract({col}, '$.wardline.kind') IN ({kinds}))"
+
+
+def _wardline_non_defect_side_sql(alias: str = "") -> str:
+    """SQL predicate that is true when a stored finding is a KNOWN non-defect kind.
+
+    The ``CASE`` form of ``_wardline_non_defect_kind_sql``, safe to embed
+    anywhere (including function arguments and ``NOT``): SQLite only guarantees
+    lazy evaluation inside ``CASE``, so ``json_extract`` never runs on corrupt
+    text. ``IS 1`` makes NULL ``metadata``, corrupt JSON, ``'{}'``, arrays, a
+    non-object ``wardline`` value and missing/unknown kinds all read false
+    (FIL-1: never selected as telemetry). Used to select rows for the
+    ``finding export`` disposal of stored telemetry.
+    """
+    col = f"{alias}.metadata" if alias else "metadata"
+    kinds = ", ".join(f"'{k}'" for k in sorted(NON_DEFECT_WARDLINE_FINDING_KINDS))
+    return f"(CASE WHEN json_valid({col}) THEN json_extract({col}, '$.wardline.kind') IN ({kinds}) ELSE 0 END IS 1)"
+
+
+def _wardline_defect_side_sql(alias: str = "") -> str:
+    """SQL predicate that is true when a stored finding is on the DEFECT side.
+
+    The negation of ``_wardline_non_defect_side_sql`` for use as a guard on
+    absence-driven transitions (the ``mark_unseen`` sweep and the clean-stale
+    ``unseen_in_latest`` -> ``fixed`` ageing): Stage 0 never moves a stored
+    telemetry row on absence. Written as a ``CASE`` because SQLite only
+    guarantees lazy evaluation there -- wrapping the ``json_valid(...) AND
+    json_extract(...)`` form in a function (e.g. ``COALESCE``) evaluates
+    ``json_extract`` on corrupt text and raises ``malformed JSON``. ``IS 1``
+    makes NULL ``metadata``, corrupt JSON, ``'{}'``, arrays, a non-object
+    ``wardline`` value and missing/unknown kinds all read as defect-side
+    (FIL-1); only a known non-defect kind is excluded.
+    """
+    return f"NOT {_wardline_non_defect_side_sql(alias)}"
+
+
+def _wardline_finding_kind(finding: Mapping[str, Any]) -> str:
+    """The wardline kind of an incoming finding, classified like the stored side.
+
+    Mirrors ``_wardline_non_defect_kind_sql``: only a KNOWN non-defect kind
+    (``NON_DEFECT_WARDLINE_FINDING_KINDS``) reads as non-defect. A missing
+    ``metadata`` / ``metadata.wardline`` / ``kind``, a non-dict or non-string
+    value, and an unknown kind all classify as ``"defect"`` (FIL-1: a finding is
+    never hidden as telemetry by accident).
+    """
+    metadata = finding.get("metadata")
+    wardline = metadata.get("wardline") if isinstance(metadata, dict) else None
+    kind = wardline.get("kind") if isinstance(wardline, dict) else None
+    return kind if isinstance(kind, str) and kind in NON_DEFECT_WARDLINE_FINDING_KINDS else "defect"
+
+
+def _kind_not_accepted_reason(finding: Mapping[str, Any]) -> str:
+    """The ``KIND_NOT_ACCEPTED`` reason for one rejected finding.
+
+    A telemetry kind gets the Stage 0 reason. A defect-side finding is only
+    rejected when an operator dropped ``defect`` from ``scan_ingest.accept_kinds``;
+    calling it telemetry would be false, so it names the setting instead.
+    """
+    if _wardline_finding_kind(finding) in NON_DEFECT_WARDLINE_FINDING_KINDS:
+        return _KIND_NOT_ACCEPTED_REASON
+    return _KIND_NOT_ACCEPTED_DEFECT_REASON
+
+
+def _kind_rejected_indices(findings: Sequence[Mapping[str, Any]], accept_kinds: Sequence[str]) -> list[int]:
+    """Request positions of findings the Stage 0 kind policy rejects.
+
+    ``*`` in *accept_kinds* accepts everything (the 3.3 behaviour). Otherwise a
+    finding is rejected exactly when its classified kind
+    (``_wardline_finding_kind``) is not accepted. The path plays no part: a
+    defect-side finding on the ``<engine>`` pseudo-path (defect, missing or
+    unknown kind -- FIL-1) is a real defect and is accepted under the default
+    policy, and a known non-defect kind is rejected on every path.
+    """
+    if SCAN_INGEST_ACCEPT_ALL_KINDS in accept_kinds:
+        return []
+    accepted = frozenset(accept_kinds)
+    return [index for index, f in enumerate(findings) if _wardline_finding_kind(f) not in accepted]
 
 
 def _wardline_field_eq_sql(field: str, alias: str = "") -> str:
@@ -1203,7 +1313,12 @@ class FilesMixin(DBMixinProtocol):
         return file_id
 
     def _pre_resolve_scan_file_records(
-        self, findings: list[dict[str, Any]], *, actor: str, stats: ScanIngestResult
+        self,
+        findings: list[dict[str, Any]],
+        *,
+        actor: str,
+        stats: ScanIngestResult,
+        request_indices: Sequence[int] | None = None,
     ) -> _ScanFileResolutions:
         """Resolve new scan file identities before the write transaction opens.
 
@@ -1223,6 +1338,10 @@ class FilesMixin(DBMixinProtocol):
         findings and keeps the rest of the batch. A batch that would ingest
         NOTHING (every row is over the cap) still raises, so a single-finding
         report keeps its registry error envelope instead of a silent no-op.
+
+        *request_indices* maps each position in *findings* back to its position
+        in the caller's REQUEST array (the ingest passes only the kind-accepted
+        survivors); ``None`` means *findings* is the request itself.
         """
         # Deduplicate unfamiliar paths and capture the language to send.
         seen_paths: set[str] = set()
@@ -1294,6 +1413,22 @@ class FilesMixin(DBMixinProtocol):
             stats["warnings"].append(warning)
         if skipped_paths and {f["path"] for f in findings} <= skipped_paths:
             raise RegistryResolutionError(_batch_error_message(body_too_large[0]), status_code=400, url="")
+        # Per-finding structured report of the drop (HTTP F2): the warning above
+        # is operator text; ``failed`` is what a producer switches on. ``index``
+        # is the position in the REQUEST so the producer can map it back.
+        # Recorded here (pre-lock, once) rather than in the write window, which
+        # ``@_retry_busy`` may re-run.
+        reasons = {err["requested_path"]: f"{err['code']}: {err['message']}" for err in body_too_large}
+        for position, f in enumerate(findings):
+            if f["path"] in skipped_paths:
+                stats["failed"].append(
+                    ScanFindingFailure(
+                        index=request_indices[position] if request_indices is not None else position,
+                        fingerprint=f.get("fingerprint") or None,
+                        code=SCAN_FAILURE_OVER_CAP,
+                        reason=f"finding dropped, file path exceeds the registry's per-path body cap ({reasons[f['path']]})",
+                    )
+                )
         return _ScanFileResolutions(resolved=batch["resolved"], skipped_paths=frozenset(skipped_paths))
 
     def _upsert_finding(
@@ -1340,7 +1475,8 @@ class FilesMixin(DBMixinProtocol):
             # it follows the finding across line moves, so identity is keyed on
             # (scan_source, fingerprint) alone, not file/rule/line.
             existing_finding = self.conn.execute(
-                "SELECT id, seen_count, scan_run_id, issue_id, status FROM scan_findings WHERE scan_source = ? AND fingerprint = ?",
+                "SELECT id, seen_count, scan_run_id, issue_id, status, file_id, message, severity, suggestion, "
+                "line_start, line_end, metadata FROM scan_findings WHERE scan_source = ? AND fingerprint = ?",
                 (scan_source, fingerprint),
             ).fetchone()
         else:
@@ -1348,7 +1484,8 @@ class FilesMixin(DBMixinProtocol):
             # without a fingerprint never collides with a fingerprint-bearing
             # row that happens to share the same site (matches the partial index).
             existing_finding = self.conn.execute(
-                "SELECT id, seen_count, scan_run_id, issue_id, status FROM scan_findings "
+                "SELECT id, seen_count, scan_run_id, issue_id, status, file_id, message, severity, suggestion, "
+                "line_start, line_end, metadata FROM scan_findings "
                 "WHERE file_id = ? AND scan_source = ? AND rule_id = ? "
                 "AND coalesce(line_start, -1) = ? AND fingerprint = ''",
                 (file_id, scan_source, rule_id, dedup_line),
@@ -1360,6 +1497,21 @@ class FilesMixin(DBMixinProtocol):
             # issue post-commit (finding→issue regress cascade).
             prior_status = existing_finding["status"]
             linked_issue_id = existing_finding["issue_id"]
+            # A replay: the stored row already equals what this batch submits.
+            # Reported as ``unchanged`` so the producer can tell "already
+            # present" from "landed nothing". A row whose content differs (or
+            # that regresses fixed -> open) is a genuine update, not unchanged.
+            if (
+                prior_status not in ("fixed", "unseen_in_latest")
+                and existing_finding["file_id"] == file_id
+                and existing_finding["message"] == f.get("message", "")
+                and existing_finding["severity"] == severity
+                and existing_finding["suggestion"] == suggestion
+                and existing_finding["line_start"] == line_start
+                and existing_finding["line_end"] == f.get("line_end")
+                and existing_finding["metadata"] == json.dumps(f.get("metadata") or {})
+            ):
+                stats["unchanged"].append(ScanUnchangedFinding(id=existing_finding["id"], reason="already_present"))
             self._update_existing_finding(
                 existing_finding=existing_finding,
                 f=f,
@@ -1508,6 +1660,9 @@ class FilesMixin(DBMixinProtocol):
     ) -> None:
         """Mark findings not in current batch as unseen_in_latest.
 
+        Stored non-defect (wardline telemetry) rows are never transitioned
+        (Stage 0); a missing/corrupt/unknown kind stays sweepable (FIL-1).
+
         Captures into *resolved* the ``(finding_id, issue_id)`` pairs whose
         status genuinely transitions open/new → ``unseen_in_latest``
         (issue-linked only), so the caller runs the close-on-fixed cascade
@@ -1518,6 +1673,13 @@ class FilesMixin(DBMixinProtocol):
         """
         terminal = tuple(TERMINAL_FINDING_STATUSES)
         terminal_ph = ",".join("?" * len(terminal))
+        # Stage 0: NEVER sweep a stored non-defect (telemetry) row, whatever the
+        # current ``accept_kinds``. A defects-only producer leaves every
+        # previously-ingested telemetry fingerprint out of its batch; without
+        # this guard each one would flip to ``unseen_in_latest`` and its linked
+        # issue would cascade-close as fixed. NULL / corrupt / ``'{}'``
+        # metadata stays on the defect side (sweepable) -- see the helper.
+        defect_side = f"AND {_wardline_defect_side_sql()}"
         for fid, fids in seen_finding_ids.items():
             not_in_clause = ""
             extra_params: list[Any] = []
@@ -1533,7 +1695,8 @@ class FilesMixin(DBMixinProtocol):
                 f"SELECT id, issue_id FROM scan_findings "
                 f"WHERE file_id = ? AND scan_source = ? AND issue_id IS NOT NULL "
                 f"AND status NOT IN ({terminal_ph}) "
-                f"AND status != 'unseen_in_latest'"
+                f"AND status != 'unseen_in_latest' "
+                f"{defect_side}"
                 f"{not_in_clause}",
                 [fid, scan_source, *terminal, *extra_params],
             ).fetchall():
@@ -1541,7 +1704,8 @@ class FilesMixin(DBMixinProtocol):
             conn.execute(
                 f"UPDATE scan_findings SET status = 'unseen_in_latest', updated_at = ?, updated_by = ? "
                 f"WHERE file_id = ? AND scan_source = ? "
-                f"AND status NOT IN ({terminal_ph})"
+                f"AND status NOT IN ({terminal_ph}) "
+                f"{defect_side}"
                 f"{not_in_clause}",
                 [now, actor, fid, scan_source, *terminal, *extra_params],
             )
@@ -1667,7 +1831,17 @@ class FilesMixin(DBMixinProtocol):
                 raise ValueError(msg)
 
         warnings = self._validate_scan_findings(findings, scan_source)
-        warnings.extend(self._normalize_line_attribution_for_existing_files(findings))
+        # Stage 0 telemetry cut: drop findings whose wardline kind the project
+        # does not accept (on any path, ``<engine>`` included) BEFORE anything else touches
+        # them -- they are never line-checked, registry-resolved, or written.
+        # Recorded once, pre-lock, like OVER_CAP. ``index`` is the REQUEST
+        # position; ``survivors`` / ``survivor_indices`` carry the rest.
+        from filigree.core import read_scan_ingest_accept_kinds
+
+        rejected = set(_kind_rejected_indices(findings, read_scan_ingest_accept_kinds(self.meta_dir)))
+        survivor_indices = [index for index in range(len(findings)) if index not in rejected]
+        survivors = [findings[index] for index in survivor_indices]
+        warnings.extend(self._normalize_line_attribution_for_existing_files(survivors))
 
         now = _now_iso()
         actor = observation_actor or f"scanner:{scan_source}"
@@ -1681,7 +1855,21 @@ class FilesMixin(DBMixinProtocol):
             observations_failed=0,
             warnings=warnings,
             weft_reasons=[],
+            failed=[],
+            unchanged=[],
+            requested=len(findings),
+            applied=0,
+            rejected_by_kind=len(rejected),
         )
+        for index in sorted(rejected):
+            stats["failed"].append(
+                ScanFindingFailure(
+                    index=index,
+                    fingerprint=findings[index].get("fingerprint") or None,
+                    code=SCAN_FAILURE_KIND_NOT_ACCEPTED,
+                    reason=_kind_not_accepted_reason(findings[index]),
+                )
+            )
         regressed_issue_ids: set[str] = set()
         # (finding_id, issue_id) pairs whose finding genuinely transitioned to
         # ``unseen_in_latest`` in the sweep below — the close-on-fixed cascade
@@ -1731,10 +1919,10 @@ class FilesMixin(DBMixinProtocol):
         # window below then runs under its own BEGIN IMMEDIATE + busy-retry, the
         # same transaction discipline every other write surface uses; scan-run
         # completion afterwards is a separate transaction.
-        file_resolutions = self._pre_resolve_scan_file_records(findings, actor=actor, stats=stats)
+        file_resolutions = self._pre_resolve_scan_file_records(survivors, actor=actor, stats=stats, request_indices=survivor_indices)
 
         self._ingest_resolved_findings(
-            findings=findings,
+            findings=survivors,
             scan_source=scan_source,
             scan_run_id=scan_run_id,
             mark_unseen=mark_unseen,
@@ -1749,6 +1937,7 @@ class FilesMixin(DBMixinProtocol):
             resolved=resolved,
             scanned_paths=scanned_paths,
         )
+        stats["applied"] = stats["findings_created"] + stats["findings_updated"]
 
         # Post-commit finding→issue cascade: reopen issues whose linked finding
         # just regressed to ``open``. Runs OUTSIDE the ingest transaction (each
@@ -1865,6 +2054,9 @@ class FilesMixin(DBMixinProtocol):
         stats["observations_created"] = 0
         stats["observations_failed"] = 0
         stats["new_finding_ids"] = []
+        # ``unchanged`` is accumulated in this window, so it resets with the rest.
+        # ``failed`` is NOT reset: it is recorded pre-lock (like ``warnings``).
+        stats["unchanged"] = []
         # Reset on every entry so a @_retry_busy re-run after a rolled-back
         # transient SQLITE_BUSY does not double-accumulate regressed/resolved issues.
         regressed_issue_ids.clear()
@@ -2288,6 +2480,11 @@ class FilesMixin(DBMixinProtocol):
         clauses = [
             "status = 'unseen_in_latest'",
             "coalesce(last_seen_at, updated_at) < ?",
+            # Stage 0: ageing to ``fixed`` is an absence-driven transition, so it
+            # never touches a stored telemetry row (e.g. ``metric`` rows a 3.3
+            # sweep already left in ``unseen_in_latest``) -- nor, via the
+            # post-commit cascade, closes its linked issue.
+            _wardline_defect_side_sql(),
         ]
         params: list[Any] = [cutoff]
 
@@ -2324,7 +2521,8 @@ class FilesMixin(DBMixinProtocol):
         """Move ``unseen_in_latest`` findings older than *days* to ``fixed``.
 
         Only affects findings whose ``last_seen_at`` (or ``updated_at`` as
-        fallback) is older than the cutoff. After the sweep commits, any fixed
+        fallback) is older than the cutoff. Stored non-defect (wardline
+        telemetry) rows are never aged to ``fixed`` (Stage 0). After the sweep commits, any fixed
         finding linked to a still-open issue cascade-closes that issue (the
         finding→issue cascade); each close runs in its own transaction and is
         best-effort, so a forbidden workflow transition is logged rather than

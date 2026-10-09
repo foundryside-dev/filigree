@@ -2,9 +2,22 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from filigree.core import FiligreeDB
+from filigree.types.events import UndoResult
+
+
+def _undo(db: FiligreeDB, issue_id: str, *, actor: str = "") -> UndoResult:
+    """Undo the event undo would reverse next (the caller saw it via events).
+
+    ``undo_last`` requires ``expected_event_id`` (MCP F1); these tests exercise
+    the reversal mechanics, so they pass the current candidate.
+    """
+    candidate = db.undo_candidate_event_id(issue_id)
+    return db.undo_last(issue_id, actor=actor, expected_event_id=candidate if candidate is not None else 1)
 
 
 class TestUndoStatus:
@@ -13,7 +26,7 @@ class TestUndoStatus:
     def test_undo_status_change(self, db: FiligreeDB) -> None:
         issue = db.create_issue("Test")
         db.update_issue(issue.id, status="in_progress", actor="t")
-        result = db.undo_last(issue.id, actor="t")
+        result = _undo(db, issue.id, actor="t")
         assert result["undone"] is True
         assert result["event_type"] == "status_changed"
         assert result["issue"]["status"] == "open"
@@ -24,7 +37,7 @@ class TestUndoStatus:
         closed = db.get_issue(issue.id)
         assert closed.closed_at is not None
 
-        result = db.undo_last(issue.id, actor="t")
+        result = _undo(db, issue.id, actor="t")
         assert result["undone"] is True
         assert result["issue"]["closed_at"] is None
 
@@ -33,7 +46,7 @@ class TestUndoTitle:
     def test_undo_title_change(self, db: FiligreeDB) -> None:
         issue = db.create_issue("Original title")
         db.update_issue(issue.id, title="Changed title", actor="t")
-        result = db.undo_last(issue.id, actor="t")
+        result = _undo(db, issue.id, actor="t")
         assert result["undone"] is True
         assert result["issue"]["title"] == "Original title"
 
@@ -42,7 +55,7 @@ class TestUndoPriority:
     def test_undo_priority_change(self, db: FiligreeDB) -> None:
         issue = db.create_issue("Test", priority=2)
         db.update_issue(issue.id, priority=0, actor="t")
-        result = db.undo_last(issue.id, actor="t")
+        result = _undo(db, issue.id, actor="t")
         assert result["undone"] is True
         assert result["issue"]["priority"] == 2
 
@@ -51,7 +64,8 @@ class TestUndoAssignee:
     def test_undo_assignee_change(self, db: FiligreeDB) -> None:
         issue = db.create_issue("Test")
         db.update_issue(issue.id, assignee="alice", actor="t")
-        result = db.undo_last(issue.id, actor="t")
+        # alice now holds a live claim, so only alice may undo (MCP F1).
+        result = _undo(db, issue.id, actor="alice")
         assert result["undone"] is True
         assert result["issue"]["assignee"] == ""
 
@@ -64,7 +78,7 @@ class TestUndoClaim:
         assert claimed.status == "open"  # claim does not change status
         assert claimed.assignee == "alice"
 
-        result = db.undo_last(issue.id, actor="t")
+        result = _undo(db, issue.id, actor="alice")
         assert result["undone"] is True
         assert result["event_type"] == "claimed"
         assert result["issue"]["status"] == "open"  # status still unchanged
@@ -83,7 +97,7 @@ class TestUndoClaim:
         claimed = db.get_issue(bug.id)
         assert claimed.status == "confirmed"  # claim does not change status
 
-        result = db.undo_last(bug.id, actor="t")
+        result = _undo(db, bug.id, actor="alice")
         assert result["undone"] is True
         assert result["event_type"] == "claimed"
         # Status stays at "confirmed" — claim never changed it
@@ -98,12 +112,12 @@ class TestUndoClaim:
         assert db.get_issue(issue.id).assignee == "alice"
 
         # Release and let bob claim (alice's claim is released, bob claims fresh)
-        db.release_claim(issue.id, actor="t")
+        db.release_claim(issue.id, actor="alice")
         db.claim_issue(issue.id, assignee="bob", actor="t")
         assert db.get_issue(issue.id).assignee == "bob"
 
         # Undo bob's claim — should restore to "" (what was there before bob claimed)
-        result = db.undo_last(issue.id, actor="t")
+        result = _undo(db, issue.id, actor="bob")
         assert result["undone"] is True
         assert result["event_type"] == "claimed"
         assert result["issue"]["assignee"] == ""
@@ -119,7 +133,7 @@ class TestUndoDependency:
         a_before = db.get_issue(a.id)
         assert b.id in a_before.blocked_by
 
-        result = db.undo_last(a.id, actor="t")
+        result = _undo(db, a.id, actor="t")
         assert result["undone"] is True
         assert result["event_type"] == "dependency_added"
 
@@ -135,7 +149,7 @@ class TestUndoDependency:
         a_before = db.get_issue(a.id)
         assert b.id not in a_before.blocked_by
 
-        result = db.undo_last(a.id, actor="t")
+        result = _undo(db, a.id, actor="t")
         assert result["undone"] is True
         assert result["event_type"] == "dependency_removed"
 
@@ -147,7 +161,7 @@ class TestUndoDescription:
     def test_undo_description_change(self, db: FiligreeDB) -> None:
         issue = db.create_issue("Test", description="original")
         db.update_issue(issue.id, description="changed", actor="t")
-        result = db.undo_last(issue.id, actor="t")
+        result = _undo(db, issue.id, actor="t")
         assert result["undone"] is True
         assert result["event_type"] == "description_changed"
         assert result["issue"]["description"] == "original"
@@ -157,7 +171,7 @@ class TestUndoNotes:
     def test_undo_notes_change(self, db: FiligreeDB) -> None:
         issue = db.create_issue("Test", notes="original")
         db.update_issue(issue.id, notes="changed", actor="t")
-        result = db.undo_last(issue.id, actor="t")
+        result = _undo(db, issue.id, actor="t")
         assert result["undone"] is True
         assert result["event_type"] == "notes_changed"
         assert result["issue"]["notes"] == "original"
@@ -167,9 +181,8 @@ class TestUndoEdgeCases:
     def test_undo_created_only_fails(self, db: FiligreeDB) -> None:
         """Issue with only a 'created' event has no reversible events."""
         issue = db.create_issue("Test")
-        result = db.undo_last(issue.id, actor="t")
-        assert result["undone"] is False
-        assert "No reversible events" in result["reason"]
+        result = _undo(db, issue.id, actor="t")
+        assert result == {"result": "no_op", "reason": "no_reversible_event"}
 
     def test_undo_skips_transition_warning(self, db: FiligreeDB) -> None:
         """transition_warning events should be skipped when finding last event."""
@@ -178,7 +191,7 @@ class TestUndoEdgeCases:
         db.update_issue(issue.id, status="confirmed", actor="t")
 
         # The most recent non-skip event should be status_changed, not transition_warning
-        result = db.undo_last(issue.id, actor="t")
+        result = _undo(db, issue.id, actor="t")
         assert result["undone"] is True
         assert result["event_type"] == "status_changed"
 
@@ -189,10 +202,9 @@ class TestUndoEdgeCases:
         is "no reversible events" rather than "already undone"."""
         issue = db.create_issue("Test")
         db.update_issue(issue.id, status="in_progress", actor="t")
-        db.undo_last(issue.id, actor="t")
-        result = db.undo_last(issue.id, actor="t")
-        assert result["undone"] is False
-        assert "No reversible events" in result["reason"]
+        _undo(db, issue.id, actor="t")
+        result = _undo(db, issue.id, actor="t")
+        assert result == {"result": "no_op", "reason": "no_reversible_event"}
 
     def test_undo_reaches_past_non_reversible_events(self, db: FiligreeDB) -> None:
         """Undo should skip non-reversible events and find earlier reversible ones."""
@@ -205,19 +217,19 @@ class TestUndoEdgeCases:
         )
         db.conn.commit()
         # Undo should skip 'released' and find 'status_changed'
-        result = db.undo_last(issue.id, actor="t")
+        result = _undo(db, issue.id, actor="t")
         assert result["undone"] is True
         assert result["event_type"] == "status_changed"
         assert result["issue"]["status"] == "open"
 
     def test_undo_nonexistent_issue_raises(self, db: FiligreeDB) -> None:
         with pytest.raises(KeyError):
-            db.undo_last("nonexistent-abc123")
+            _undo(db, "nonexistent-abc123")
 
     def test_undone_event_recorded(self, db: FiligreeDB) -> None:
         issue = db.create_issue("Test")
         db.update_issue(issue.id, status="in_progress", actor="t")
-        db.undo_last(issue.id, actor="undoer")
+        _undo(db, issue.id, actor="undoer")
 
         events = db.get_issue_events(issue.id)
         undone_events = [e for e in events if e["event_type"] == "undone"]
@@ -265,7 +277,7 @@ class TestUndoRollback:
         monkeypatch.setattr(db, "_record_event", failing_record_event)
 
         with pytest.raises(RuntimeError, match="Simulated"):
-            db.undo_last(issue.id, actor="t")
+            _undo(db, issue.id, actor="t")
 
         # The status should NOT have been changed — rollback should have reverted it
         after = db.get_issue(issue.id)
@@ -286,7 +298,7 @@ class TestUndoNullGuards:
         )
         db.conn.commit()
 
-        result = db.undo_last(issue.id)
+        result = _undo(db, issue.id)
         assert result["undone"] is False
         assert "no old_value" in result["reason"].lower()
 
@@ -300,7 +312,7 @@ class TestUndoNullGuards:
         )
         db.conn.commit()
 
-        result = db.undo_last(issue.id)
+        result = _undo(db, issue.id)
         assert result["undone"] is False
         assert "no old_value" in result["reason"].lower()
 
@@ -314,7 +326,7 @@ class TestUndoNullGuards:
         )
         db.conn.commit()
 
-        result = db.undo_last(issue.id)
+        result = _undo(db, issue.id)
         assert result["undone"] is False
         assert "not a valid priority" in result["reason"].lower()
 
@@ -328,7 +340,7 @@ class TestUndoNullGuards:
         )
         db.conn.commit()
 
-        result = db.undo_last(issue.id)
+        result = _undo(db, issue.id)
         assert result["undone"] is False
         assert "no old_value" in result["reason"].lower()
 
@@ -343,7 +355,7 @@ class TestUndoNullGuards:
         )
         db.conn.commit()
 
-        result = db.undo_last(issue.id)
+        result = _undo(db, issue.id)
         assert result["undone"] is False
         assert "no old_value" in result["reason"].lower()
 
@@ -361,7 +373,7 @@ class TestUndoCloseConsistency:
         assert closed.closed_at is not None
 
         # Undo the close
-        result = db.undo_last(issue.id)
+        result = _undo(db, issue.id)
         assert result["undone"] is True
 
         # closed_at should be cleared
@@ -385,7 +397,7 @@ class TestUndoCloseConsistency:
 
         # Now undo the reopen — this should restore the closed status
         # The most recent reversible event should be the status_changed from reopen
-        result = db.undo_last(issue.id)
+        result = _undo(db, issue.id)
         assert result["undone"] is True
 
         # closed_at should be set because we're back in a done state
@@ -407,7 +419,7 @@ class TestUndoCloseConsistency:
         assert closed.status_category == "done"
 
         # Undo close -> should restore to in_progress
-        result = db.undo_last(issue.id)
+        result = _undo(db, issue.id)
         assert result["undone"] is True
         after_undo = db.get_issue(issue.id)
         assert after_undo.status == "in_progress"
@@ -434,7 +446,7 @@ class TestUndoCloseConsistency:
         assert closed.fields.get("close_reason") == "duplicate of foo"
 
         # Single undo must reverse status, closed_at, AND close_reason.
-        result = db.undo_last(issue.id, actor="t")
+        result = _undo(db, issue.id, actor="t")
         assert result["undone"] is True
         assert result["event_type"] == "status_changed"
 
@@ -486,7 +498,7 @@ class TestUndoFields:
         """Undoing a field change should restore the previous fields."""
         issue = db.create_issue("Test", fields={"a": "1", "b": "2"})
         db.update_issue(issue.id, fields={"b": "changed", "c": "3"}, actor="t")
-        result = db.undo_last(issue.id, actor="t")
+        result = _undo(db, issue.id, actor="t")
         assert result["undone"] is True
         assert result["event_type"] == "fields_changed"
         restored = db.get_issue(issue.id)
@@ -496,7 +508,7 @@ class TestUndoFields:
         """Undoing fields added to an issue that started with no fields."""
         issue = db.create_issue("Test")
         db.update_issue(issue.id, fields={"key": "val"}, actor="t")
-        result = db.undo_last(issue.id, actor="t")
+        result = _undo(db, issue.id, actor="t")
         assert result["undone"] is True
         restored = db.get_issue(issue.id)
         assert restored.fields == {}
@@ -509,7 +521,7 @@ class TestUndoFields:
         """
         issue = db.create_issue("Test")
         db.update_issue(issue.id, status="in_progress", actor="t")
-        first = db.undo_last(issue.id, actor="t")
+        first = _undo(db, issue.id, actor="t")
         assert first["undone"] is True
         # The undone event's new_value should be the event_id of the status_changed event
         undone_events = db.conn.execute(
@@ -522,9 +534,8 @@ class TestUndoFields:
         # candidate-selection NOT EXISTS clause filters out the already-undone
         # event, so the reason becomes "No reversible events to undo" rather
         # than "already undone".
-        second = db.undo_last(issue.id, actor="t")
-        assert second["undone"] is False
-        assert "No reversible events" in second["reason"]
+        second = _undo(db, issue.id, actor="t")
+        assert second == {"result": "no_op", "reason": "no_reversible_event"}
 
     def test_undo_field_change_with_corrupt_json(self, db: FiligreeDB) -> None:
         """Undoing a field change with corrupt stored JSON returns failure, not exception."""
@@ -536,7 +547,7 @@ class TestUndoFields:
             (issue.id,),
         )
         db.conn.commit()
-        result = db.undo_last(issue.id, actor="t")
+        result = _undo(db, issue.id, actor="t")
         assert result["undone"] is False
         assert "corrupt" in result["reason"].lower()
 
@@ -554,14 +565,14 @@ class TestUndoFallsBackPastAlreadyUndone:
         db.update_issue(issue.id, title="Changed title", actor="t")
         db.update_issue(issue.id, priority=0, actor="t")
 
-        first = db.undo_last(issue.id, actor="t")
+        first = _undo(db, issue.id, actor="t")
         assert first["undone"] is True
         assert first["event_type"] == "priority_changed"
         assert db.get_issue(issue.id).priority == 2
         # Title still in its post-change state
         assert db.get_issue(issue.id).title == "Changed title"
 
-        second = db.undo_last(issue.id, actor="t")
+        second = _undo(db, issue.id, actor="t")
         assert second["undone"] is True, f"second undo failed: {second}"
         assert second["event_type"] == "title_changed"
         assert db.get_issue(issue.id).title == "Original title"
@@ -577,7 +588,7 @@ class TestUndoParentChanged:
         db.update_issue(child.id, parent_id=parent.id, actor="t")
         assert db.get_issue(child.id).parent_id == parent.id
 
-        result = db.undo_last(child.id, actor="t")
+        result = _undo(db, child.id, actor="t")
         assert result["undone"] is True, f"undo failed: {result}"
         assert result["event_type"] == "parent_changed"
         assert db.get_issue(child.id).parent_id is None
@@ -591,7 +602,7 @@ class TestUndoParentChanged:
         db.update_issue(child.id, parent_id=parent_b.id, actor="t")
         assert db.get_issue(child.id).parent_id == parent_b.id
 
-        result = db.undo_last(child.id, actor="t")
+        result = _undo(db, child.id, actor="t")
         assert result["undone"] is True
         assert db.get_issue(child.id).parent_id == parent_a.id
 
@@ -604,7 +615,7 @@ class TestUndoParentChanged:
         db.update_issue(child.id, parent_id="", actor="t")
         assert db.get_issue(child.id).parent_id is None
 
-        result = db.undo_last(child.id, actor="t")
+        result = _undo(db, child.id, actor="t")
         assert result["undone"] is True
         assert db.get_issue(child.id).parent_id == parent.id
 
@@ -627,7 +638,7 @@ class TestUndoParentChangedCycleGuard:
 
         # Undoing C's last parent_changed would set C.parent=A, but A->C
         # already exists, so this would create a cycle. Must be refused.
-        result = db.undo_last(c.id, actor="t")
+        result = _undo(db, c.id, actor="t")
         assert result["undone"] is False
         assert "cycle" in result["reason"].lower() or "circular" in result["reason"].lower()
         # Ensure no cycle was actually written.
@@ -650,7 +661,7 @@ class TestUndoFieldsChangedSchemaGuard:
             (issue.id, '{"foo":"baz"}', "2999-01-01T00:00:00+00:00"),
         )
         db.conn.commit()
-        result = db.undo_last(issue.id, actor="t")
+        result = _undo(db, issue.id, actor="t")
         assert result["undone"] is False
         # Fields must remain untouched.
         assert db.get_issue(issue.id).fields == {"foo": "bar"}
@@ -663,7 +674,7 @@ class TestUndoFieldsChangedSchemaGuard:
             (issue.id, '{"foo":"baz"}', "2999-01-01T00:00:00+00:00"),
         )
         db.conn.commit()
-        result = db.undo_last(issue.id, actor="t")
+        result = _undo(db, issue.id, actor="t")
         assert result["undone"] is False
         row = db.conn.execute("SELECT fields FROM issues WHERE id = ?", (issue.id,)).fetchone()
         # Stored fields column must still be a JSON object, not '[]'.
@@ -690,12 +701,15 @@ class TestUndoConcurrentRace:
         db2 = FiligreeDB(db_path, prefix="test", check_same_thread=False)
         db2.initialize()
 
+        target = db1.undo_candidate_event_id(issue.id)
+        assert target is not None
         results: list[dict | None] = [None, None]
         barrier = threading.Barrier(2)
 
         def worker(idx: int, dbref: FiligreeDB) -> None:
             barrier.wait()
-            results[idx] = dbref.undo_last(issue.id, actor=f"a{idx}")
+            # Both callers saw the same event; the loser must not reverse anything.
+            results[idx] = dict(dbref.undo_last(issue.id, actor=f"a{idx}", expected_event_id=target))
 
         t1 = threading.Thread(target=worker, args=(0, db1))
         t2 = threading.Thread(target=worker, args=(1, db2))
@@ -729,7 +743,7 @@ class TestUndoDependencyTypeWithColon:
         db.add_dependency(a.id, b.id, dep_type="namespaced:type", actor="t")
         assert any(d["from"] == a.id and d["to"] == b.id for d in db.get_all_dependencies())
 
-        result = db.undo_last(a.id, actor="t")
+        result = _undo(db, a.id, actor="t")
         assert result["undone"] is True
         assert result["event_type"] == "dependency_added"
         # The dependency must be gone now (undo removes it)
@@ -744,7 +758,7 @@ class TestUndoDependencyTypeWithColon:
         # Sanity: edge gone
         assert not any(d["from"] == a.id and d["to"] == b.id for d in db.get_all_dependencies())
 
-        result = db.undo_last(a.id, actor="t")
+        result = _undo(db, a.id, actor="t")
         assert result["undone"] is True, f"undo failed: {result}"
         assert result["event_type"] == "dependency_removed"
         deps = db.get_all_dependencies()
@@ -752,3 +766,102 @@ class TestUndoDependencyTypeWithColon:
         assert edge is not None, "dependency_removed undo did not restore the edge"
         # The original dep_type must round-trip
         assert edge["type"] == "namespaced:type", f"dep_type was lost on undo; got {edge['type']!r}"
+
+
+class TestUndoPreconditions:
+    """MCP F1 (Task 0.4): undo is a compare-and-swap on the event to reverse,
+    holder-checked against a live claim, and a no-op when nothing is left."""
+
+    def test_undo_requires_expected_event_id(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("Test")
+        db.update_issue(issue.id, title="Renamed", actor="t")
+        with pytest.raises(TypeError):
+            db.undo_last(issue.id, actor="t")  # type: ignore[call-arg]
+
+    def test_undo_mismatched_event_id_is_conflict(self, db: FiligreeDB) -> None:
+        from filigree.types.api import UndoConflictError
+
+        issue = db.create_issue("Test")
+        db.update_issue(issue.id, title="First", actor="t")
+        first_id = db.undo_candidate_event_id(issue.id)
+        db.update_issue(issue.id, title="Second", actor="t")
+        latest_id = db.undo_candidate_event_id(issue.id)
+        assert first_id is not None
+        assert latest_id is not None
+        assert latest_id != first_id
+
+        with pytest.raises(UndoConflictError) as excinfo:
+            db.undo_last(issue.id, actor="t", expected_event_id=first_id)
+
+        assert excinfo.value.details == {"issue_id": issue.id, "expected_event_id": first_id, "latest_event_id": latest_id}
+        assert db.get_issue(issue.id).title == "Second"
+        assert not [e for e in db.get_issue_events(issue.id) if e["event_type"] == "undone"]
+
+    def test_undo_retry_does_not_walk_back_a_second_event(self, db: FiligreeDB) -> None:
+        from filigree.types.api import UndoConflictError
+
+        issue = db.create_issue("Test")
+        db.update_issue(issue.id, title="First", actor="t")
+        db.update_issue(issue.id, title="Second", actor="t")
+        target = db.undo_candidate_event_id(issue.id)
+        assert target is not None
+
+        first = db.undo_last(issue.id, actor="t", expected_event_id=target)
+        assert first["undone"] is True
+        with pytest.raises(UndoConflictError):
+            db.undo_last(issue.id, actor="t", expected_event_id=target)
+
+        assert db.get_issue(issue.id).title == "First"
+
+    def test_undo_by_non_holder_is_conflict(self, db: FiligreeDB) -> None:
+        from filigree.types.api import UndoConflictError
+
+        issue = db.create_issue("Test")
+        db.claim_issue(issue.id, assignee="alice", actor="alice")
+        db.update_issue(issue.id, title="Alice's title", actor="alice")
+        target = db.undo_candidate_event_id(issue.id)
+        assert target is not None
+
+        with pytest.raises(UndoConflictError) as excinfo:
+            db.undo_last(issue.id, actor="bob", expected_event_id=target)
+
+        assert excinfo.value.details == {"issue_id": issue.id, "holder": "alice", "actor": "bob"}
+        assert db.get_issue(issue.id).title == "Alice's title"
+
+    def test_undo_by_holder_is_allowed(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("Test")
+        db.claim_issue(issue.id, assignee="alice", actor="alice")
+        db.update_issue(issue.id, title="Alice's title", actor="alice")
+        target = db.undo_candidate_event_id(issue.id)
+        assert target is not None
+
+        result = db.undo_last(issue.id, actor="alice", expected_event_id=target)
+
+        assert result["undone"] is True
+        assert db.get_issue(issue.id).title == "Test"
+
+    def test_undo_override_records_event(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("Test")
+        db.claim_issue(issue.id, assignee="alice", actor="alice")
+        db.update_issue(issue.id, title="Alice's title", actor="alice")
+        target = db.undo_candidate_event_id(issue.id)
+        assert target is not None
+
+        result = db.undo_last(issue.id, actor="coordinator", expected_event_id=target, override=True)
+
+        assert result["undone"] is True
+        undone = [e for e in db.get_issue_events(issue.id) if e["event_type"] == "undone"]
+        assert len(undone) == 1
+        assert undone[0]["actor"] == "coordinator"
+        assert json.loads(undone[0]["comment"]) == {"override": True, "holder": "alice"}
+
+    def test_undo_nothing_is_no_op(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("Test")
+        assert db.undo_candidate_event_id(issue.id) is None
+        before = db.conn.execute("SELECT COUNT(*) FROM events WHERE issue_id = ?", (issue.id,)).fetchone()[0]
+
+        result = db.undo_last(issue.id, actor="t", expected_event_id=12345)
+
+        assert result == {"result": "no_op", "reason": "no_reversible_event"}
+        after = db.conn.execute("SELECT COUNT(*) FROM events WHERE issue_id = ?", (issue.id,)).fetchone()[0]
+        assert after == before

@@ -92,11 +92,11 @@ class FindingIssueCascadeService:
     def close_fixed_finding(self, finding_id: str, issue_id: str, *, warnings: list[str]) -> bool:
         """Best-effort close of an issue whose linked finding just went fixed.
 
-        Governed issues (DECISION 1A) are closed only if the Legis closure gate
-        allows; a blocked / unavailable / stale / integrity verdict fails closed
-        and is recorded as reconciliation debt (Design A). The gate makes no
-        network call for ungoverned issues, for a drifted (stale) sign-off, or
-        when ``LEGIS_URL`` is unset.
+        Governed issues (DECISION 1A) are closed only if the closure gate
+        allows; a stale (drifted sign-off / drifted code) verdict fails closed
+        and is recorded as reconciliation debt (Design A). The gate never makes
+        a network call: Legis is retired, so a governed issue with fresh
+        bindings closes with a ``governance_provider_archived`` warning.
         """
         # Function-local import: the data layer must not import the (network-
         # touching) governance module at module scope.
@@ -109,27 +109,12 @@ class FindingIssueCascadeService:
         """Gate-and-close a batch of ``(finding_id, issue_id)``; return the ids
         that closed.
 
-        Suppresses the per-issue Legis *network call* after the first
-        ``UNAVAILABLE`` verdict so a down/slow Legis costs at most one timeout
-        per batch. The suppression is threaded into ``evaluate_closure_gate``
-        (``legis_known_down``) rather than fabricated here, so the gate's cheap
-        local checks still run for every candidate: an ungoverned or
-        governance-off issue later in the batch still PROCEEDs (DECISION 1A —
-        ungoverned closes never touch Legis), and a stale binding still reports
-        ``STALE``. Only a governed, non-stale issue fails closed as
-        ``UNAVAILABLE`` without a further network call. ``INTEGRITY_FAILURE``
-        (ledger tamper) and ``CONTRACT_VIOLATION`` (a 2xx that broke the wire
-        contract — Legis answered, so it is reachable) are per-issue verdicts,
-        not connectivity problems, so neither sets ``legis_down``: a single
-        malformed Legis answer fails closed for its own issue while every later
-        issue in the batch still gets its own gate evaluation.
-
         The RED-1 current-code drift probe (a Loomweave round-trip per governed,
-        non-stale issue) is bounded the same way via ``loomweave_known_down``,
-        but as an *enrich-only* signal: a down Loomweave costs one retry budget
-        per batch, and the remaining governed issues get freshness UNKNOWN
-        (logged) while still receiving their own Legis verdict. It never
-        converts into a deferral or reconciliation debt — the gate reports it on
+        non-stale issue) is bounded via ``loomweave_known_down``, as an
+        *enrich-only* signal: a down Loomweave costs one retry budget per
+        batch, and the remaining governed issues get freshness UNKNOWN (logged)
+        and are still gated on their own local checks. It never converts into a
+        deferral or reconciliation debt — the gate reports it on
         ``GateDecision.loomweave_unavailable`` rather than through an outcome.
         The gate sets that flag only for a failure that proves the backend
         down (no answer from Loomweave, or a retried-out gateway 502/503/504
@@ -141,17 +126,11 @@ class FindingIssueCascadeService:
         drifted binding is still caught.
         """
         from filigree import governance
-        from filigree.governance import GateOutcome
 
         closed: list[str] = []
-        legis_down = False
         loomweave_down = False
         for finding_id, issue_id in candidates:
-            decision = governance.evaluate_closure_gate(
-                self.store, issue_id, legis_known_down=legis_down, loomweave_known_down=loomweave_down
-            )
-            if decision.outcome is GateOutcome.UNAVAILABLE:
-                legis_down = True
+            decision = governance.evaluate_closure_gate(self.store, issue_id, loomweave_known_down=loomweave_down)
             if decision.loomweave_unavailable:
                 loomweave_down = True
             if self._apply_close_decision(finding_id, issue_id, decision, warnings=warnings):

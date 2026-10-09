@@ -34,6 +34,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import parse_qs
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -57,6 +58,7 @@ from filigree.core import (
 )
 
 # Re-export so test imports continue to work.
+from filigree.dashboard_call_log import CallLogMiddleware
 from filigree.dashboard_routes.common import _safe_bounded_int as _safe_bounded_int
 from filigree.install_support.version_marker import format_schema_mismatch_guidance
 from filigree.registry import RegistryUnavailableError, RegistryVersionMismatchError
@@ -136,9 +138,17 @@ def _mint_and_guard_federation_token(mint_dir: Path, *, allow_env_pin: bool) -> 
         mint_token_file,
         read_env_token,
         read_token_file,
+        reconcile_token_file,
     )
 
     minted = mint_token_file(mint_dir)
+    # HTTP F14: mint reuses an existing file even when an operator env token is
+    # active and differs — the daemon then enforces the env token while siblings
+    # read (and send) the stale file value and 401. Realign the published file to
+    # the env token. Flow is env → file only; it never writes os.environ, so it is
+    # safe in server mode too (F1 forbids the reverse: promoting a file token to a
+    # cross-project env pin). A no-op without an env token or without a file.
+    reconcile_token_file(mint_dir)
     env_tok, _ = read_env_token()
     if not (minted and not env_tok and read_token_file(mint_dir) != minted):
         return False
@@ -167,8 +177,23 @@ def _mint_and_guard_federation_token(mint_dir: Path, *, allow_env_pin: bool) -> 
     return False
 
 
+def _auth_source_label(token_env: str | None) -> str:
+    """Map a resolver *source* to the ``/api/health`` ``auth.source`` vocabulary."""
+    from filigree.federation_token import FEDERATION_TOKEN_ENV_VARS
+
+    if token_env is None:
+        return "none"
+    if token_env in FEDERATION_TOKEN_ENV_VARS:
+        return "env"
+    return "file"
+
+
 def _dashboard_auth_scope(*, federation_enabled: bool, token_env: str | None) -> dict[str, Any]:
     return {
+        # HTTP F14: which tier supplied the enforced token. ``file_matches_active``
+        # is added per request in api_health (it reads the published file live).
+        "mode": "bearer" if federation_enabled else "off",
+        "source": _auth_source_label(token_env),
         "federation": {
             "enabled": federation_enabled,
             "token_env": token_env,
@@ -1021,6 +1046,17 @@ def create_app(*, server_mode: bool = False) -> ASGIApp:
         html = (STATIC_DIR / "dashboard.html").read_text()
         return HTMLResponse(html)
 
+    def _health_auth() -> dict[str, Any]:
+        # HTTP F14: does the published token file (what same-host siblings read
+        # and send) hold the token this daemon enforces? Read live, not at
+        # create_app, so a file rewritten after boot shows up immediately. With
+        # auth off the resolver found no file token either, so "no token" on both
+        # sides counts as a match.
+        from filigree.federation_token import read_token_file
+
+        published = read_token_file(_token_store_dir) if _token_store_dir is not None else ""
+        return {**app.state.auth_scope, "file_matches_active": published == _api_token}
+
     @app.get("/api/health")
     async def api_health() -> JSONResponse:
         if server_mode and dashboard_state.project_store is not None:
@@ -1030,10 +1066,10 @@ def create_app(*, server_mode: bool = False) -> ASGIApp:
                     "mode": "server",
                     "projects": len(dashboard_state.project_store.list_projects()),
                     "version": __version__,
-                    "auth": app.state.auth_scope,
+                    "auth": _health_auth(),
                 }
             )
-        return JSONResponse({"status": "ok", "mode": EPHEMERAL_MODE, "version": __version__, "auth": app.state.auth_scope})
+        return JSONResponse({"status": "ok", "mode": EPHEMERAL_MODE, "version": __version__, "auth": _health_auth()})
 
     @app.get("/api/projects")
     async def api_projects() -> JSONResponse:
@@ -1088,6 +1124,23 @@ def create_app(*, server_mode: bool = False) -> ASGIApp:
         # parsers can disagree about repeated parameters and let authentication
         # and MCP database routing select different projects.
         app.routes.append(Mount("/mcp", app=_mcp_handler))
+
+    # Call-outcome logging (3.4.0 instrumentation). Added last so it is the
+    # outermost middleware and sees auth rejections and CORS preflights too.
+    def _request_population(scope: Any) -> str | None:
+        from filigree.dashboard_auth import extract_federation_scope
+        from filigree.logging import population_for
+
+        if not server_mode:
+            return population_for(dashboard_state.db.meta_dir if dashboard_state.db is not None else None)
+        store = dashboard_state.project_store
+        if store is None:
+            return None
+        query = parse_qs(scope.get("query_string", b"").decode("latin-1")).get("project", [None])[0]
+        key = extract_federation_scope(scope.get("path", ""), query) or store.default_key
+        return population_for(store.store_dir_for(key)) if key else None
+
+    app.add_middleware(CallLogMiddleware, population=_request_population)
 
     return app
 
@@ -1232,6 +1285,26 @@ def main(
             print(f"Error opening project database: {exc}", file=sys.stderr)
             print("Run `filigree doctor` for diagnosis.", file=sys.stderr)
             sys.exit(1)
+
+    # JSONL call log: one ``event="call"`` record per HTTP request lands in the
+    # served project's filigree.log (server mode: the daemon's own config dir).
+    # Real serve only — create_app (called directly by tests) never attaches a
+    # file handler. Set up BEFORE the token mint/reconcile below so the boot-time
+    # ``token_file_reconciled`` (INFO) and ``federation_token_persist_failed``
+    # records land in this log: the ``filigree`` logger has no handler and an
+    # effective WARNING level until setup_logging runs (HTTP F14 review).
+    try:
+        from filigree.logging import setup_logging
+
+        if server_mode:
+            from filigree.server import SERVER_CONFIG_DIR
+
+            SERVER_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            setup_logging(SERVER_CONFIG_DIR)
+        elif _db is not None:
+            setup_logging(_db.meta_dir)
+    except OSError:
+        logger.warning("Could not open the dashboard call log; HTTP calls will not be logged", exc_info=True)
 
     # First-serve federation-token mint (tier 2). Auto-provision the daemon's own
     # token file so single-host federation auth works with zero operator toil; the

@@ -397,6 +397,30 @@ class PlanningMixin(DBMixinProtocol):
             return False, None
         return tpl.startability(issue.status)
 
+    def ready_for_orientation(self, ready: list[Issue] | None = None) -> tuple[list[tuple[Issue, bool, str | None]], int]:
+        """Project the ready queue for human/agent orientation surfaces.
+
+        Returns ``(entries, startable_count)``. Each entry is
+        ``(issue, startable, next_action)`` from :meth:`issue_startability`.
+        Container types (release, epic, milestone, phase — the type template's
+        ``container`` flag, the same predicate ``start_next_work`` uses) are
+        dropped: they group work, they are never work to start. Remaining
+        entries are ordered startable-first, keeping the queue's priority order
+        within each group, so a display cap cannot fill up with leaves that
+        ``start-work`` would reject.
+        """
+        if ready is None:
+            ready = self.get_ready()
+        entries: list[tuple[Issue, bool, str | None]] = []
+        for issue in ready:
+            tpl = self.templates.get_type(issue.type)
+            if tpl is not None and tpl.container:
+                continue
+            startable, next_action = self.issue_startability(issue)
+            entries.append((issue, startable, next_action))
+        entries.sort(key=lambda e: not e[1])  # stable: startable first
+        return entries, sum(1 for e in entries if e[1])
+
     def get_blocked(self) -> list[Issue]:
         """Issues in open- or wip-category states that have at least one non-done blocker.
 

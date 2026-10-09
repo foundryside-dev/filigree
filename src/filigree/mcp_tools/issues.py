@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
+    from filigree.commit_reachability import ReachabilityCheck
     from filigree.types.core import StatusCategory
 
 from mcp.types import TextContent, Tool
@@ -43,8 +46,10 @@ from filigree.types.api import (
     IssueDeletionRefusedError,
     IssueWithChangedFields,
     IssueWithTransitions,
+    NoOpResponse,
     PublicIssue,
     SlimIssue,
+    StartNextWorkResponse,
     TransitionDetail,
     claim_conflict_envelope,
     classify_release_claim_error,
@@ -451,9 +456,11 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                     "commit": {
                         "type": "string",
                         "description": (
-                            "Opaque branch@sha commit anchor (warpline seam). Stored verbatim as "
-                            "close_commit so warpline can correlate 'changed since closed' on the "
-                            "commit, not the clock. Omit to leave it null."
+                            "branch@sha commit anchor, stored verbatim as close_commit. Filigree "
+                            "checks the sha against origin/<integration_ref> (default main); if it is "
+                            "not reachable the close still succeeds and the response carries a "
+                            "'commit_not_reachable_from_integration_ref' entry in warnings[]. Omit to "
+                            "leave it null."
                         ),
                     },
                 },
@@ -575,7 +582,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                     "commit": {
                         "type": "string",
                         "description": (
-                            "Opaque branch@sha commit anchor (warpline seam). Stored verbatim as claim_commit. Omit to leave it null."
+                            "Optional opaque branch@sha commit anchor for the claim. Stored verbatim as claim_commit. Omit to leave it null."
                         ),
                     },
                 },
@@ -591,23 +598,29 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                 "predecessor of the current wip status (e.g. in_progress→open for task, fixing→confirmed "
                 "for bug); types with no open predecessor fall back to initial_state. Pass "
                 "revert_status=false to keep the legacy behaviour and leave the status unchanged. "
-                "By default this is strict and only succeeds if the issue has an assignee. "
-                "Pass if_held=true for release-if-held cleanup: unassigned issues are a no-op, "
-                "and assigned issues are only released when held by expected_assignee or, if omitted, actor."
+                "Holder-checked: actor must be the current holder — a claim held by anyone else returns CONFLICT "
+                "and is left alone. expected_assignee is an extra compare-and-swap guard, never authorization: "
+                "naming the holder does not let a non-holder release. To free a peer's stale claim use work_reclaim "
+                "(holder-checked transfer); override=true is the coordinator release and is recorded as a "
+                "released_by_override event. Releasing an issue nobody holds is an idempotent "
+                '{"result": "no_op", "reason": "not_claimed"}.'
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "issue_id": {"type": "string", "description": "Issue ID to release"},
-                    "actor": {"type": "string", "description": "Agent/user identity for audit trail"},
-                    "if_held": {
-                        "type": "boolean",
-                        "default": False,
-                        "description": "Idempotent release-if-held mode; unassigned issues are returned unchanged.",
-                    },
+                    "actor": {"type": "string", "description": "Agent/user identity; must be the current holder unless override=true"},
                     "expected_assignee": {
                         "type": "string",
-                        "description": "Only release when the current assignee matches this value; defaults to actor in if_held mode.",
+                        "description": (
+                            "Optional extra CAS guard: the current holder must also equal this value (mismatch is "
+                            "CONFLICT, even with override). Does not authorize releasing someone else's claim."
+                        ),
+                    },
+                    "override": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Coordinator release of a claim actor does not hold; recorded as released_by_override.",
                     },
                     "reason": {"type": "string", "description": "Audit reason for releasing the claim."},
                     "revert_status": {
@@ -629,7 +642,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                 "Bulk-release every live claim held by ``actor`` in one call — designed for "
                 "end-of-session cleanup. Discovers all issues whose assignee == actor "
                 "(optionally narrowed by ``label`` and/or ``label_prefix``), then releases "
-                "each via work_release(if_held=True). Done-category issues are skipped "
+                "each via the holder-checked work_release. Done-category issues are skipped "
                 "(their assignee is audit trail, not a live claim). Returns "
                 "BatchResponse[SlimIssue] with succeeded[] (released) and failed[] "
                 "(per-issue errors). Pair this with the ``cluster:*`` label convention: "
@@ -680,16 +693,26 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
             name="heartbeat_work",
             description=(
                 "Refresh claim liveness metadata for a claimed issue. "
-                "By default actor is treated as the expected current holder; pass expected_assignee for coordinator flows."
+                "Holder-checked: actor is required and must be the current holder, or the call returns CONFLICT. "
+                "expected_assignee is only an extra compare-and-swap guard, never authorization. "
+                "override=true is the coordinator bypass and is recorded as a heartbeat_by_override event."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "issue_id": {"type": "string", "description": "Issue ID to heartbeat"},
-                    "actor": {"type": "string", "description": "Agent/user identity for audit trail and holder check"},
+                    "actor": {"type": "string", "description": "Agent/user identity; must be the current holder unless override=true"},
                     "expected_assignee": {
                         "type": "string",
-                        "description": "Only heartbeat when the current assignee matches this value.",
+                        "description": (
+                            "Extra compare-and-swap guard: the current assignee must also equal this value (else "
+                            "CONFLICT, even with override). Does not authorize refreshing someone else's claim."
+                        ),
+                    },
+                    "override": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Coordinator refresh of a claim actor does not hold; recorded as heartbeat_by_override.",
                     },
                     "lease_hours": {
                         "type": "integer",
@@ -698,7 +721,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                         "description": "Lease duration from this heartbeat, in hours.",
                     },
                 },
-                "required": ["issue_id"],
+                "required": ["issue_id", "actor"],
             },
         ),
         Tool(
@@ -755,6 +778,9 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
             description=(
                 "Claim the highest-priority open-category ready issue by setting assignee. "
                 "Does NOT change status — use issue_update to advance through workflow after claiming. "
+                "Retry-safe: if the assignee claimed an issue within the last 60 s and still holds it (or "
+                "client_request_id matches the request that claimed it), that issue is returned with "
+                "already_holding=true instead of claiming a second one. "
                 "Identity: provide assignee or actor — whichever is omitted defaults from the other."
             ),
             inputSchema={
@@ -776,6 +802,14 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                     "actor": {
                         "type": "string",
                         "description": "Agent/user identity for audit trail (defaults to assignee)",
+                    },
+                    "client_request_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": (
+                            "Caller-chosen idempotency key for this request. A retry with the same id by the same "
+                            "assignee returns the issue that request claimed (already_holding=true) if still held."
+                        ),
                     },
                 },
             },
@@ -822,7 +856,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                     "commit": {
                         "type": "string",
                         "description": (
-                            "Opaque branch@sha commit anchor (warpline seam). Stored verbatim as claim_commit. Omit to leave it null."
+                            "Optional opaque branch@sha commit anchor for the claim. Stored verbatim as claim_commit. Omit to leave it null."
                         ),
                     },
                 },
@@ -837,6 +871,9 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                 "Candidates that are ready but not single-hop startable (e.g. triage bugs) are skipped; pass advance=true "
                 "to make them startable via the multi-hop soft walk. "
                 "Returns the transitioned issue, or {status: 'empty'} when no ready issue matches. "
+                "Retry-safe: if the assignee started an issue within the last 60 s and still holds it (or "
+                "client_request_id matches the request that claimed it), that issue is returned with "
+                "already_holding=true instead of starting a second one. "
                 "Identity: provide assignee or actor — whichever is omitted defaults from the other."
             ),
             inputSchema={
@@ -871,6 +908,14 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                         "description": (
                             "Walk soft transitions to wip so multi-hop types (e.g. triage bugs) become startable "
                             "instead of skipped. Default false."
+                        ),
+                    },
+                    "client_request_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": (
+                            "Caller-chosen idempotency key for this request. A retry with the same id by the same "
+                            "assignee returns the issue that request claimed (already_holding=true) if still held."
                         ),
                     },
                 },
@@ -1027,10 +1072,11 @@ async def _handle_get_issue(arguments: dict[str, Any]) -> list[TextContent]:
                 ],
             )
             out: dict[str, Any] = dict(result)
-            if include_files:
-                out["files"] = file_assocs
-            return _text(out)
-        out = dict(issue_payload)
+        else:
+            out = dict(issue_payload)
+        # Task 0.6: verdict of the close-time commit reachability check
+        # (true / false / "unknown"); null without a close anchor.
+        out["close_commit_reachable"] = tracker.get_close_commit_reachable(issue)
         if include_files:
             out["files"] = file_assocs
         return _text(out)
@@ -1234,7 +1280,56 @@ async def _handle_update_issue(arguments: dict[str, Any]) -> list[TextContent]:
         return _text(ErrorResponse(error=msg, code=ErrorCode.VALIDATION))
 
 
-async def _handle_close_issue(arguments: dict[str, Any]) -> list[TextContent]:
+@dataclass(frozen=True)
+class PreparedClose:
+    """The commit-reachability verdict an ``issue_close`` call computed before the tool lock.
+
+    ``check`` is ``None`` when the close was not going to reach the check (a
+    404 or an already-closed issue at pre-lock time); the handler then re-asks
+    ``close_commit_check_applies`` under the lock and runs git inline only in
+    the rare case that answer changed meanwhile.
+    """
+
+    issue_id: str
+    commit: str
+    check: ReachabilityCheck | None
+
+
+async def _prepare_close_issue(arguments: dict[str, Any]) -> PreparedClose | None:
+    """Pre-lock hook for ``issue_close`` (final review I4).
+
+    ``call_tool`` runs this BEFORE taking the per-project tool lock, so the git
+    fetch + merge-base (up to ~10 s each) never holds up the other MCP calls on
+    the project. ``check_close_commit`` touches no DB connection; the only DB
+    access here is ``close_commit_check_applies`` -- one read-only statement on
+    the event-loop thread, which cannot interleave with another coroutine's
+    statement. Never raises: on any surprise it returns ``None`` and the
+    handler computes the check itself, as before.
+    """
+    issue_id = arguments.get("issue_id")
+    commit = arguments.get("commit")
+    if not isinstance(issue_id, str) or not isinstance(commit, str):
+        return None
+    try:
+        tracker = get_db()
+        if not tracker.close_commit_check_applies(issue_id):
+            return PreparedClose(issue_id=issue_id, commit=commit, check=None)
+        check = await asyncio.to_thread(tracker.check_close_commit, commit)
+    except Exception:
+        logger.debug("issue_close pre-lock commit check failed; the handler will compute it", exc_info=True)
+        return None
+    return PreparedClose(issue_id=issue_id, commit=commit, check=check)
+
+
+#: Hooks ``call_tool`` awaits before taking the per-project tool lock, keyed by
+#: canonical handler name. The result is passed to the handler as ``_prepared``.
+#: Only work that touches no DB transaction belongs here.
+PRE_LOCK_HOOKS: dict[str, Callable[[dict[str, Any]], Awaitable[Any]]] = {
+    "close_issue": _prepare_close_issue,
+}
+
+
+async def _handle_close_issue(arguments: dict[str, Any], *, _prepared: PreparedClose | None = None) -> list[TextContent]:
     args = _parse_args(arguments, CloseIssueArgs)
     actor, actor_err = _validate_actor(args.get("actor", "mcp"))
     if actor_err:
@@ -1249,6 +1344,20 @@ async def _handle_close_issue(arguments: dict[str, Any]) -> list[TextContent]:
     if commit is not None and not isinstance(commit, str):
         return _text(ErrorResponse(error="commit must be a string", code=ErrorCode.VALIDATION))
     tracker = get_db()
+    # Task 0.6: the commit reachability check runs git (fetch + merge-base, up
+    # to ~10 s each), so it runs off the event loop -- and before the close's
+    # DB work, so nothing below awaits between reading and writing. It touches
+    # no DB connection. Final review I4: ``call_tool`` normally computed it
+    # before taking the per-project tool lock (``_prepare_close_issue``); the
+    # inline path covers direct handler calls and a pre-lock "not applicable"
+    # answer that changed since.
+    # Skipped when the close will 404 or refuse as already closed.
+    commit_check = None
+    prepared = _prepared if _prepared is not None and (_prepared.issue_id, _prepared.commit) == (args["issue_id"], commit) else None
+    if prepared is not None and prepared.check is not None:
+        commit_check = prepared.check
+    elif commit is not None and tracker.close_commit_check_applies(args["issue_id"]):
+        commit_check = await asyncio.to_thread(tracker.check_close_commit, commit)
     try:
         gate = governance.evaluate_closure_gate(tracker, args["issue_id"])
         if not gate.allowed:
@@ -1264,6 +1373,7 @@ async def _handle_close_issue(arguments: dict[str, Any]) -> list[TextContent]:
             expected_assignee=expected_assignee,
             force=force,
             commit=commit,
+            _close_commit_check=commit_check,
         )
         refresh_summary()
         ready_after = tracker.get_ready()
@@ -1271,6 +1381,10 @@ async def _handle_close_issue(arguments: dict[str, Any]) -> list[TextContent]:
         result: dict[str, Any] = dict(issue_to_public(issue))
         if annotation_warnings:
             result["annotation_warnings"] = annotation_warnings
+        # Task 0.6: advisory warnings (closure gate + commit reachability), omitted when empty.
+        close_warnings = [*gate.warnings, *issue.close_warnings]
+        if close_warnings:
+            result["warnings"] = close_warnings
         if newly_unblocked:
             result["newly_unblocked"] = [_slim_issue(i) for i in newly_unblocked]
         return _text(result)
@@ -1425,9 +1539,9 @@ async def _handle_release_claim(arguments: dict[str, Any]) -> list[TextContent]:
     actor, actor_err = _validate_actor(args.get("actor", "mcp"))
     if actor_err:
         return actor_err
-    if_held = args.get("if_held", False)
-    if not isinstance(if_held, bool):
-        return _text(ErrorResponse(error="if_held must be a boolean", code=ErrorCode.VALIDATION))
+    override = args.get("override", False)
+    if not isinstance(override, bool):
+        return _text(ErrorResponse(error="override must be a boolean", code=ErrorCode.VALIDATION))
     expected_assignee = args.get("expected_assignee")
     if expected_assignee is not None and not isinstance(expected_assignee, str):
         return _text(ErrorResponse(error="expected_assignee must be a string", code=ErrorCode.VALIDATION))
@@ -1442,11 +1556,13 @@ async def _handle_release_claim(arguments: dict[str, Any]) -> list[TextContent]:
         issue = tracker.release_claim(
             args["issue_id"],
             actor=actor,
-            if_held=if_held,
             expected_assignee=expected_assignee,
+            override=override,
             reason=reason,
             revert_status=revert_status,
         )
+        if issue is None:
+            return _text(NoOpResponse(result="no_op", reason="not_claimed"))
         refresh_summary()
         return _text(issue_to_public(issue))
     except KeyError:
@@ -1527,30 +1643,27 @@ async def _handle_release_my_claims(arguments: dict[str, Any]) -> list[TextConte
 
 async def _handle_heartbeat_work(arguments: dict[str, Any]) -> list[TextContent]:
     args = _parse_args(arguments, HeartbeatWorkArgs)
-    # When the caller omits actor, default the audit identity to the issue's
-    # current assignee rather than the literal string 'mcp'. The previous
-    # default ('mcp') failed the implicit holder check whenever the actual
-    # holder forgot to pass actor: the rightful holder's heartbeat would
-    # CONFLICT with "expected 'mcp'", silently letting the lease expire.
-    # (filigree-cb980eee0d, P2.5 senior-user MCP review.)
+    # Final review I5: ``actor`` is required and must be the holder (unless
+    # override). The old default-to-holder (filigree-cb980eee0d, P2.5) made the
+    # holder check empty for any caller who left ``actor`` out, so any peer
+    # could keep a stale lease alive.
+    raw_actor = args.get("actor")
+    if raw_actor is None:
+        return _text(
+            ErrorResponse(
+                error="actor is required: pass the holder's identity (or override=true as coordinator)",
+                code=ErrorCode.VALIDATION,
+            )
+        )
+    actor, actor_err = _validate_actor(raw_actor)
+    if actor_err:
+        return actor_err
     expected_assignee = args.get("expected_assignee")
     if expected_assignee is not None and not isinstance(expected_assignee, str):
         return _text(ErrorResponse(error="expected_assignee must be a string", code=ErrorCode.VALIDATION))
-    raw_actor = args.get("actor")
-    if raw_actor is None:
-        # No explicit actor — read the current holder so the audit row is
-        # attributed correctly and the holder check is a no-op (caller
-        # didn't ask for one).
-        tracker = get_db()
-        try:
-            issue = tracker.get_issue(args["issue_id"])
-        except KeyError:
-            return _text(ErrorResponse(error=f"Issue not found: {args['issue_id']}", code=ErrorCode.NOT_FOUND))
-        actor = issue.assignee or "mcp"
-    else:
-        actor, actor_err = _validate_actor(raw_actor)
-        if actor_err:
-            return actor_err
+    override = args.get("override", False)
+    if not isinstance(override, bool):
+        return _text(ErrorResponse(error="override must be a boolean", code=ErrorCode.VALIDATION))
     lease_hours = args.get("lease_hours", 48)
     lease_err = _validate_int_range(lease_hours, "lease_hours", min_val=1)
     if lease_err:
@@ -1561,6 +1674,7 @@ async def _handle_heartbeat_work(arguments: dict[str, Any]) -> list[TextContent]
             args["issue_id"],
             actor=actor,
             expected_assignee=expected_assignee,
+            override=override,
             lease_hours=lease_hours,
         )
         refresh_summary()
@@ -1660,15 +1774,18 @@ async def _handle_claim_next(arguments: dict[str, Any]) -> list[TextContent]:
             priority_min=priority_min,
             priority_max=priority_max,
             actor=actor,
+            client_request_id=args.get("client_request_id"),
         )
     except ValueError as e:
         return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
     if claimed is None:
         return _text(ClaimNextEmptyResponse(status="empty", reason="No ready issues matching filters"))
-    refresh_summary()
+    if not claimed.already_holding:
+        refresh_summary()
     result = ClaimNextResponse(
         **issue_to_public(claimed),
         selection_reason=claimed.format_claim_next_reason(),
+        already_holding=claimed.already_holding,
     )
     return _text(result)
 
@@ -1859,6 +1976,7 @@ async def _handle_start_next_work(arguments: dict[str, Any]) -> list[TextContent
             target_status=args.get("target_status"),
             actor=actor,
             advance=advance,
+            client_request_id=args.get("client_request_id"),
         )
     except (AmbiguousTransitionError, InvalidTransitionError) as e:
         return _text(ErrorResponse(error=str(e), code=ErrorCode.INVALID_TRANSITION))
@@ -1867,5 +1985,6 @@ async def _handle_start_next_work(arguments: dict[str, Any]) -> list[TextContent
         return _text(ErrorResponse(error=msg, code=classify_value_error(msg)))
     if claimed is None:
         return _text(ClaimNextEmptyResponse(status="empty", reason="No ready issues matching filters"))
-    refresh_summary()
-    return _text(issue_to_public(claimed))
+    if not claimed.already_holding:
+        refresh_summary()
+    return _text(StartNextWorkResponse(**issue_to_public(claimed), already_holding=claimed.already_holding))

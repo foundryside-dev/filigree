@@ -355,22 +355,26 @@ def release_claim(
     self,
     issue_id: str,
     *,
-    actor: str = "",
-    if_held: bool = False,
+    actor: str,
     expected_assignee: str | None = None,
+    override: bool = False,
     reason: str = "",
-) -> Issue
+    revert_status: bool = True,
+) -> Issue | None
 ```
 
-Releases a claimed issue by clearing its assignee. Does **not** change status.
-By default this is strict and raises when the issue is already unassigned. With
-`if_held=True`, unassigned issues are returned unchanged, but assigned issues are
-only released when held by `expected_assignee` or, if omitted, `actor`;
-held-by-other mismatches raise `ClaimConflictError`.
+Releases a claimed issue by clearing its assignee (and, by default, reverting a
+wip-category status to its open predecessor). Holder-checked: without
+`override`, `actor` must be the live assignee. `expected_assignee` is an extra
+compare-and-swap guard (the live assignee must also equal it), never
+authorization. `override=True` is the only way to release a claim `actor` does
+not hold (coordinator); it is recorded as a `released_by_override` event
+(`expected_assignee` is still enforced). An issue nobody holds returns `None` — the idempotent no-op.
 
-**Raises:** `ValueError` if strict mode sees no assignee; `ClaimConflictError`
-if `if_held=True` would clear a claim held by someone other than the expected
-holder.
+**Raises:** `ClaimConflictError` when the issue is held by someone other than
+`actor` (without `override`) or `expected_assignee`, or is reassigned between
+read and write; `ValueError` for a blank actor without `override`, or a done-category
+issue.
 
 #### `heartbeat_work`
 
@@ -379,15 +383,19 @@ def heartbeat_work(
     self,
     issue_id: str,
     *,
-    actor: str = "",
+    actor: str,
     expected_assignee: str | None = None,
+    override: bool = False,
     lease_hours: int = 48,
 ) -> Issue
 ```
 
-Refreshes liveness metadata for a claimed, non-done issue. The current assignee
-must match `expected_assignee` when provided, otherwise `actor` is treated as the
-expected holder when non-empty. Updates `last_heartbeat_at` and
+Refreshes liveness metadata for a claimed, non-done issue. Holder-checked like
+`release_claim`: without `override`, `actor` must be the current assignee
+(`ClaimConflictError` otherwise; `ValueError` for a blank actor).
+`expected_assignee` is an additional compare-and-swap guard, never
+authorization. `override=True` drops the actor check and records the refresh as
+a `heartbeat_by_override` event. Updates `last_heartbeat_at` and
 `claim_expires_at`.
 
 #### `get_stale_claims`
@@ -880,10 +888,16 @@ Returns events for a specific issue, newest first.
 #### `undo_last`
 
 ```python
-def undo_last(self, issue_id: str, *, actor: str = "") -> dict[str, Any]
+def undo_last(self, issue_id: str, *, actor: str = "", expected_event_id: int, override: bool = False) -> UndoResult
+def undo_candidate_event_id(self, issue_id: str) -> int | None
 ```
 
-Undoes the most recent reversible event for an issue. Reversible events: `status_changed`, `title_changed`, `priority_changed`, `assignee_changed`, `claimed`, `dependency_added`, `dependency_removed`, `description_changed`, `notes_changed`.
+Undoes the most recent reversible event for an issue. Reversible events: `status_changed`, `title_changed`, `priority_changed`, `assignee_changed`, `claimed`, `dependency_added`, `dependency_removed`, `description_changed`, `notes_changed`, `fields_changed`, `parent_changed`.
+
+`expected_event_id` must be the id of the event undo would reverse
+(`undo_candidate_event_id`); otherwise `UndoConflictError` is raised with
+`details.latest_event_id`. If another actor holds a live claim on the issue,
+`UndoConflictError` is raised with `details.holder` unless `override=True`.
 
 **Returns:**
 ```python
@@ -891,6 +905,9 @@ Undoes the most recent reversible event for an issue. Reversible events: `status
 {"undone": True, "event_type": str, "event_id": int, "issue": dict}
 
 # Nothing to undo:
+{"result": "no_op", "reason": "no_reversible_event"}
+
+# The event could not be reversed (e.g. it has no old_value):
 {"undone": False, "reason": str}
 ```
 

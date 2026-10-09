@@ -19,6 +19,7 @@ from filigree.types.core import AssocType, ISOTimestamp, RegistryBackend, ScanRu
 from filigree.types.events import EventType
 
 if TYPE_CHECKING:
+    from filigree.commit_reachability import ReachabilityCheck
     from filigree.db_entity_associations import EntityAssociationRow
     from filigree.registry import RegistryProtocol
     from filigree.templates import TemplateRegistry, TransitionOption
@@ -397,6 +398,7 @@ class DBMixinProtocol(Protocol):
         mode: TransitionMode = TransitionMode.FORWARD,
         claim_commit: str | None = None,
         close_commit: str | None = None,
+        _close_commit_check: ReachabilityCheck | None = None,
         _skip_begin: bool = False,
     ) -> Issue: ...
 
@@ -411,6 +413,7 @@ class DBMixinProtocol(Protocol):
         expected_assignee: str | None = None,
         force: bool = False,
         commit: str | None = None,
+        _close_commit_check: ReachabilityCheck | None = None,
         _skip_begin: bool = False,
     ) -> Issue: ...
 

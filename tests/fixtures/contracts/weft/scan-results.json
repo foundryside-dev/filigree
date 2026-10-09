@@ -10,8 +10,8 @@
       "docs/plans/2026-04-24-adr017-audit.md"
     ],
     "pinning_discipline": "shape reference; see docs/federation/contracts.md",
-    "relation_to_classic": "Same request shape (bytes-identical). Response shape differs: weft wraps ScanIngestResult in a BatchResponse-style envelope — new_finding_ids becomes succeeded (BatchResponse.succeeded), per-finding ingest failures become failed (BatchResponse.failed, empty in 2.0 until per-finding failure tracking lands), counts move to a stats sibling, warnings stay at the top level.",
-    "updated": "2026-04-24"
+    "relation_to_classic": "Same request shape (bytes-identical). Response shape differs: weft wraps ScanIngestResult in a BatchResponse-style envelope — new_finding_ids becomes succeeded (BatchResponse.succeeded), per-finding ingest failures become failed (a list of {index, fingerprint, code, reason} entries addressed by request position; empty when nothing was dropped), replayed findings are listed under unchanged, counts move to a stats sibling (now including requested/applied), warnings stay at the top level as operator text.",
+    "updated": "2026-10-09"
   },
   "shape_decl": {
     "request_type": "ScanIngestRequest (identical to classic)",
@@ -21,16 +21,20 @@
     "response_type": "ScanIngestResponseWeft",
     "response_shape": {
       "succeeded": "list[str]  # server-generated finding ids for newly-created findings (was: new_finding_ids in classic)",
-      "failed": "list[BatchFailure]  # per-finding ingest failures; always present as [] today. Populated when future per-finding failure tracking lands (non-breaking addition).",
+      "failed": "list[ScanFindingFailureWeft]  # per-finding ingest failures, always present ([] when nothing was dropped). Each entry: {index: int (position in the request findings array), fingerprint: str|null, code: str, reason: str}. The code vocabulary is OPEN - treat an unknown code as a generic rejection. Documented codes: OVER_CAP (finding dropped by the registry's per-path body cap; emitted today), VALIDATION (malformed finding; reserved - a malformed finding currently rejects the whole batch with HTTP 400), SCHEME_MISMATCH (fingerprint scheme differs from the store's; reserved - carried batch-level by weft_reasons today, the findings are still ingested), KIND_NOT_ACCEPTED (Stage 0 telemetry cut; emitted today: the finding's kind - metadata.wardline.kind when it is a known non-defect kind (fact/classification/metric/suggestion), otherwise defect (a missing, malformed, or unknown kind counts as defect) - is not in the project's scan_ingest.accept_kinds (default [\"defect\"]; [\"*\"] accepts everything), or its path is the <engine> pseudo-path while \"*\" is not accepted. reason is 'telemetry kinds are not work; see Stage 0'). The effective accept_kinds is advertised as accept_kinds on GET /api/files/_schema (and /api/weft/files/_schema). Additive: a consumer that ignores failed still sees the same succeeded/stats/warnings.",
+      "unchanged": "list[{id: str, reason: 'already_present'}]  # always present ([] when none). Findings the batch matched to an already-stored row with identical content (same scan_source + fingerprint) - a replayed batch. They are NOT in succeeded (succeeded stays newly-created ids); a finding that matched but whose content changed is counted in stats.findings_updated, not listed here.",
       "stats": {
         "files_created": "int",
         "files_updated": "int",
         "findings_created": "int",
         "findings_updated": "int",
         "observations_created": "int",
-        "observations_failed": "int"
+        "observations_failed": "int",
+        "requested": "int  # number of findings in the request",
+        "applied": "int  # findings_created + findings_updated; requested - applied is what failed[] itemises (plus the unchanged replays, which count as updated)",
+        "rejected_by_kind": "int  # findings rejected with KIND_NOT_ACCEPTED (Stage 0): a metadata.wardline.kind outside the project's scan_ingest.accept_kinds, or an <engine> pseudo-path row. Each is also itemised in failed[]."
       },
-      "warnings": "list[str]  # validation warnings from db._validate_scan_findings (e.g. unknown severity coerced to 'info')"
+      "warnings": "list[str]  # operator text only (e.g. unknown severity coerced to 'info'; the human-readable twin of a failed[] entry). Machine-readable outcomes live in failed / unchanged."
     },
     "external_adapter_contract": "Filigree does not parse SARIF on this endpoint. External SARIF adapters MUST map SARIF result.partialFingerprints or result.fingerprints into each scan-results finding.fingerprint before POSTing. Filigree then preserves finding.fingerprint through ingest, readback, promotion, fingerprint dedup, stale/fixed transitions, and reopen-on-regress lifecycle handling. Fingerprint-less legacy findings remain accepted and use the file/source/rule/line heuristic.",
     "rationale": "BatchResponse-style wrapper per ADR-002 §1 and work-package Phase A2. Scan-results has mixed semantics (batch ingest + summary counts); the envelope honours the batch-semantics-where-applicable rule by exposing succeeded/failed (per-finding granularity) while preserving the counts signal in a stats sibling. Named subtype so future weft endpoints with similar mixed semantics have a pattern to follow."
@@ -54,13 +58,17 @@
         "body": {
           "succeeded": [],
           "failed": [],
+          "unchanged": [],
           "stats": {
             "files_created": 0,
             "files_updated": 0,
             "findings_created": 0,
             "findings_updated": 0,
             "observations_created": 0,
-            "observations_failed": 0
+            "observations_failed": 0,
+            "requested": 0,
+            "applied": 0,
+            "rejected_by_kind": 0
           },
           "warnings": []
         }
@@ -102,13 +110,17 @@
         "body": {
           "succeeded": ["sf_example_generated_id"],
           "failed": [],
+          "unchanged": [],
           "stats": {
             "files_created": 1,
             "files_updated": 0,
             "findings_created": 1,
             "findings_updated": 0,
             "observations_created": 0,
-            "observations_failed": 0
+            "observations_failed": 0,
+            "requested": 1,
+            "applied": 1,
+            "rejected_by_kind": 0
           },
           "warnings": []
         }
@@ -152,13 +164,17 @@
         "body": {
           "succeeded": ["sf_example_generated_id"],
           "failed": [],
+          "unchanged": [],
           "stats": {
             "files_created": 1,
             "files_updated": 0,
             "findings_created": 1,
             "findings_updated": 0,
             "observations_created": 0,
-            "observations_failed": 0
+            "observations_failed": 0,
+            "requested": 1,
+            "applied": 1,
+            "rejected_by_kind": 0
           },
           "warnings": []
         }
@@ -184,13 +200,162 @@
         "body": {
           "succeeded": [],
           "failed": [],
+          "unchanged": [],
           "stats": {
             "files_created": 0,
             "files_updated": 0,
             "findings_created": 0,
             "findings_updated": 0,
             "observations_created": 0,
-            "observations_failed": 0
+            "observations_failed": 0,
+            "requested": 0,
+            "applied": 0,
+            "rejected_by_kind": 0
+          },
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "success_replayed_batch_reports_unchanged",
+      "note": "Replay. The same fingerprinted batch is POSTed twice (setup_requests carries the first POST). The second response lists the already-stored finding under unchanged instead of a bare succeeded: []; stats.findings_updated counts the re-seen row and applied = created + updated.",
+      "setup_requests": [
+        {
+          "method": "POST",
+          "path": "/api/weft/scan-results",
+          "body": {
+            "scan_source": "wardline",
+            "findings": [
+              {"path": "src/example/flow.py", "rule_id": "WLN-TAINT", "severity": "high", "message": "Tainted source reaches sink", "line_start": 21, "line_end": 21, "fingerprint": "wardline:v1:3fd0f7f0b4b84567"}
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "path": "/api/weft/scan-results",
+        "headers": {"Content-Type": "application/json"},
+        "body": {
+          "scan_source": "wardline",
+          "findings": [
+            {"path": "src/example/flow.py", "rule_id": "WLN-TAINT", "severity": "high", "message": "Tainted source reaches sink", "line_start": 21, "line_end": 21, "fingerprint": "wardline:v1:3fd0f7f0b4b84567"}
+          ]
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {"Content-Type": "application/json"},
+        "body": {
+          "succeeded": [],
+          "failed": [],
+          "unchanged": [{"id": "sf_example_generated_id", "reason": "already_present"}],
+          "stats": {
+            "files_created": 0,
+            "files_updated": 0,
+            "findings_created": 0,
+            "findings_updated": 1,
+            "observations_created": 0,
+            "observations_failed": 0,
+            "requested": 1,
+            "applied": 1,
+            "rejected_by_kind": 0
+          },
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "partial_over_cap_drop_reports_failed",
+      "replayable": false,
+      "replay_note": "Needs a Loomweave registry that answers BODY_TOO_LARGE for one path; the local registry used by the generic parity replay cannot. Bound to the live handler by tests/api/test_files_api.py::TestScanResultsPerFindingOutcomes::test_over_cap_example_matches_live_response (fake registry).",
+      "note": "Partial ingest. Finding 1's file path exceeds the registry's per-path body cap, so it is dropped and itemised in failed (index is its position in the REQUEST array); finding 0 is ingested normally. The warning is the human-readable twin of the failed entry.",
+      "request": {
+        "method": "POST",
+        "path": "/api/weft/scan-results",
+        "headers": {"Content-Type": "application/json"},
+        "body": {
+          "scan_source": "wardline",
+          "findings": [
+            {"path": "src/example/ok.py", "rule_id": "WLN-TAINT", "severity": "high", "message": "Tainted source reaches sink", "fingerprint": "wardline:v1:aaaaaaaaaaaaaaaa"},
+            {"path": "src/example/path_too_long_for_the_registry.py", "rule_id": "WLN-TAINT", "severity": "high", "message": "Tainted source reaches sink", "fingerprint": "wardline:v1:bbbbbbbbbbbbbbbb"}
+          ]
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {"Content-Type": "application/json"},
+        "body": {
+          "succeeded": ["sf_example_generated_id"],
+          "failed": [
+            {
+              "index": 1,
+              "fingerprint": "wardline:v1:bbbbbbbbbbbbbbbb",
+              "code": "OVER_CAP",
+              "reason": "finding dropped, file path exceeds the registry's per-path body cap (BODY_TOO_LARGE: path does not fit under the registry body cap)"
+            }
+          ],
+          "unchanged": [],
+          "stats": {
+            "files_created": 1,
+            "files_updated": 0,
+            "findings_created": 1,
+            "findings_updated": 0,
+            "observations_created": 0,
+            "observations_failed": 0,
+            "requested": 2,
+            "applied": 1,
+            "rejected_by_kind": 0
+          },
+          "warnings": ["Findings for file 'src/example/path_too_long_for_the_registry.py' not ingested (BODY_TOO_LARGE): path does not fit under the registry body cap"]
+        }
+      }
+    },
+    {
+      "name": "partial_kind_not_accepted_reports_failed",
+      "note": "Stage 0 telemetry cut under the default scan_ingest.accept_kinds ([\"defect\"]). Finding 0 is a defect and is ingested. Finding 1 carries a telemetry kind (metadata.wardline.kind = fact) and finding 2 carries one on the <engine> pseudo-path (metadata.wardline.kind = metric); the path plays no part, so both are rejected per-finding with KIND_NOT_ACCEPTED (index is the position in the REQUEST array), counted in stats.rejected_by_kind, and never written. The batch still returns 200.",
+      "request": {
+        "method": "POST",
+        "path": "/api/weft/scan-results",
+        "headers": {"Content-Type": "application/json"},
+        "body": {
+          "scan_source": "wardline",
+          "findings": [
+            {"path": "src/example/handler.py", "rule_id": "PY-WL-001", "severity": "high", "message": "Tainted source reaches sink", "fingerprint": "wardline:v1:cccccccccccccccc", "metadata": {"wardline": {"kind": "defect"}}},
+            {"path": "src/example/handler.py", "rule_id": "WL-FACT-TIER", "severity": "info", "message": "Function classified at tier 2", "fingerprint": "wardline:v1:dddddddddddddddd", "metadata": {"wardline": {"kind": "fact"}}},
+            {"path": "<engine>", "rule_id": "WL-ENGINE-RUN", "severity": "info", "message": "Analysed 42 files", "fingerprint": "wardline:v1:eeeeeeeeeeeeeeee", "metadata": {"wardline": {"kind": "metric"}}}
+          ]
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {"Content-Type": "application/json"},
+        "body": {
+          "succeeded": ["sf_example_generated_id"],
+          "failed": [
+            {
+              "index": 1,
+              "fingerprint": "wardline:v1:dddddddddddddddd",
+              "code": "KIND_NOT_ACCEPTED",
+              "reason": "telemetry kinds are not work; see Stage 0"
+            },
+            {
+              "index": 2,
+              "fingerprint": "wardline:v1:eeeeeeeeeeeeeeee",
+              "code": "KIND_NOT_ACCEPTED",
+              "reason": "telemetry kinds are not work; see Stage 0"
+            }
+          ],
+          "unchanged": [],
+          "stats": {
+            "files_created": 1,
+            "files_updated": 0,
+            "findings_created": 1,
+            "findings_updated": 0,
+            "observations_created": 0,
+            "observations_failed": 0,
+            "requested": 3,
+            "applied": 1,
+            "rejected_by_kind": 2
           },
           "warnings": []
         }

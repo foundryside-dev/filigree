@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "filigree"
-version = "3.3.0"
+version = "3.4.0"
 description = "Agent-native issue tracker with convention-based project discovery"
 requires-python = ">=3.11"
 license = "MIT"
@@ -126,6 +126,7 @@ ignore = [
 "tests/**/*.py" = ["S101"]  # assert is fine in tests
 "src/filigree/core.py" = ["S608"]  # SQL placeholders are parameterized ?-markers, not injection
 "src/filigree/analytics.py" = ["S608"]  # SQL IN-clause uses ? placeholders, not string interpolation
+"src/filigree/finding_export.py" = ["S608"]  # SQL IN-clauses use ? placeholders; the predicate is a module constant
 "src/filigree/mcp_server.py" = ["E501", "S110"]  # MCP tool schemas have long inline JSON lines; best-effort registry
 "src/filigree/hooks.py" = ["S110"]  # Best-effort registry registration
 "src/filigree/dashboard.py" = ["E501", "S608", "B008"]  # Long HTML strings; SQL uses ? params; FastAPI Depends()

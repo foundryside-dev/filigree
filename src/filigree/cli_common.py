@@ -7,6 +7,7 @@ without circular imports.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import json as json_mod
 import logging
@@ -181,6 +182,42 @@ def _detect_json_via_parse(group: click.Group, raw_args: list[str]) -> bool:
             return parse_command(sub_cmd, sub_tokens[1:], ctx)
 
     return parse_command(group, raw_args)
+
+
+def _resolve_command_path(group: click.Group, raw_args: list[str]) -> str:
+    """Return the space-joined command path (e.g. ``show``, ``finding clean-stale``).
+
+    Resolved the same way as :func:`_detect_json_via_parse` — a resilient,
+    side-effect-free Click parse — so option values (``--actor X``) are never
+    mistaken for command names. Returns ``""`` when no subcommand is named
+    (bare ``--help`` / ``--version``) or the name does not resolve. Each segment
+    is the registered name, except hidden aliases, which report the canonical verb.
+    Never raises.
+    """
+    names: list[str] = []
+
+    def walk(command: click.Command, args: list[str], parent: click.Context | None) -> None:
+        with click.Context(command, parent=parent, resilient_parsing=True) as ctx:
+            command.parse_args(ctx, args)
+            if not isinstance(command, click.Group):
+                return
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                protected = list(getattr(ctx, "protected_args", None) or [])
+            sub_tokens = protected + list(ctx.args)
+            if not sub_tokens:
+                return
+            sub_cmd = command.get_command(ctx, sub_tokens[0])
+            if sub_cmd is None:
+                return
+            # The typed token is the registered name; hidden back-compat aliases
+            # report the command's own canonical name instead.
+            names.append(sub_cmd.name if sub_cmd.hidden and sub_cmd.name else sub_tokens[0])
+            walk(sub_cmd, sub_tokens[1:], ctx)
+
+    with contextlib.suppress(Exception):
+        walk(group, raw_args, None)
+    return " ".join(names)
 
 
 def _emit_startup_failure(exc: Exception, code: ErrorCode, *, human_prefix: str = "") -> None:

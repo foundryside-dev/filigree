@@ -18,8 +18,7 @@ class TestGenerateSummary:
     def test_empty_db(self, db: FiligreeDB) -> None:
         summary = generate_summary(db)
         assert "Project Pulse" in summary
-        # The auto-seeded "Future" release singleton means Open: 1, not 0
-        assert "Open: 1" in summary
+        assert "Open: 0" in summary
         assert "(none)" in summary
 
     def test_with_issues(self, populated_db: PopulatedDB) -> None:
@@ -79,8 +78,21 @@ class TestGenerateSummary:
         for i in range(18):
             db.create_issue(f"Ready {i}")
         summary = generate_summary(db)
-        # 18 created + 1 auto-seeded Future release = 19 ready; 19 - 12 = 7 more
-        assert "...and 7 more" in summary
+        # 18 ready - 12 shown = 6 more
+        assert "...and 6 more" in summary
+
+    def test_ready_omits_containers_and_marks_unstartable(self, db: FiligreeDB) -> None:
+        """Containers never appear as ready work; non-startable leaves are marked."""
+        epic = db.create_issue("Big epic", type="epic", priority=0)
+        bug = db.create_issue("Triage bug", type="bug", priority=0)
+        task = db.create_issue("Plain task", type="task", priority=3)
+        summary = generate_summary(db)
+        ready = summary.split("## Ready to Work", 1)[1].split("\n## ", 1)[0]
+        assert epic.id not in ready
+        lines = [line for line in ready.splitlines() if line.startswith("- ")]
+        assert task.id in lines[0]  # startable first despite lower priority
+        assert bug.id in lines[1]
+        assert "— not startable: move to 'confirmed' first" in lines[1]
 
     def test_stale_section(self, db: FiligreeDB) -> None:
         """In-progress issues >3 days old appear in stale section."""
@@ -210,8 +222,7 @@ class TestCategoryAwareSummary:
         c = db.create_issue("C")
         db.close_issue(c.id)  # done
         summary = generate_summary(db)
-        # Open: 2 = A + auto-seeded Future release (planning is open category)
-        assert "Open: 2" in summary
+        assert "Open: 1" in summary
         assert "In Progress: 1" in summary
         assert "Done: 1" in summary
 
@@ -256,11 +267,11 @@ class TestCategoryAwareSummary:
         assert "(fixing)" in summary
 
     def test_ready_truncation_at_12(self, db: FiligreeDB) -> None:
-        """14 ready issues + 1 auto-seeded Future release = 15 ready; shows 12 + '...and 3 more'."""
+        """14 ready issues; shows 12 + '...and 2 more'."""
         for i in range(14):
             db.create_issue(f"Ready {i}")
         summary = generate_summary(db)
-        assert "...and 3 more" in summary
+        assert "...and 2 more" in summary
 
     def test_epic_limit_10(self, db: FiligreeDB) -> None:
         """12 open epics → only 10 shown in Epic Progress."""

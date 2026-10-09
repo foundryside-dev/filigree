@@ -5,7 +5,7 @@ from __future__ import annotations
 import ast
 from collections.abc import Generator
 from pathlib import Path
-from typing import get_type_hints
+from typing import Any, get_type_hints
 
 import pytest
 
@@ -53,7 +53,7 @@ from filigree.types.core import (
     PromoteObservationResult,
     ScanFindingDict,
 )
-from filigree.types.events import EventRecord, EventRecordWithTitle, UndoFailure, UndoSuccess
+from filigree.types.events import EventRecord, EventRecordWithTitle, UndoFailure, UndoNoOp, UndoSuccess
 from filigree.types.files import (
     CleanStaleResult,
     EnrichedFileItem,
@@ -714,24 +714,42 @@ class TestEventRecordWithTitleShape:
         assert isinstance(event["event_type"], str)
 
 
+def _undo_current(db: FiligreeDB, issue_id: str) -> Any:
+    candidate = db.undo_candidate_event_id(issue_id)
+    return db.undo_last(issue_id, expected_event_id=candidate if candidate is not None else 1)
+
+
 class TestUndoResultShape:
+    def test_no_op_keys(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("Test", type="task")
+        result = _undo_current(db, issue.id)
+        hints = get_type_hints(UndoNoOp)
+        assert set(result.keys()) == set(hints.keys())
+
     def test_failure_keys(self, db: FiligreeDB) -> None:
         issue = db.create_issue("Test", type="task")
-        result = db.undo_last(issue.id)
+        # A title_changed event with no old_value cannot be reversed.
+        db.conn.execute(
+            "INSERT INTO events (issue_id, event_type, actor, old_value, new_value, comment, created_at) "
+            "VALUES (?, 'title_changed', 't', NULL, 'x', '', '2999-01-01T00:00:00+00:00')",
+            (issue.id,),
+        )
+        db.conn.commit()
+        result = _undo_current(db, issue.id)
         hints = get_type_hints(UndoFailure)
         assert set(result.keys()) == set(hints.keys())
 
     def test_success_keys(self, db: FiligreeDB) -> None:
         issue = db.create_issue("Test", type="task")
         db.update_issue(issue.id, status="in_progress")
-        result = db.undo_last(issue.id)
+        result = _undo_current(db, issue.id)
         hints = get_type_hints(UndoSuccess)
         assert set(result.keys()) == set(hints.keys())
 
     def test_success_value_types(self, db: FiligreeDB) -> None:
         issue = db.create_issue("Test", type="task")
         db.update_issue(issue.id, status="in_progress")
-        result = db.undo_last(issue.id)
+        result = _undo_current(db, issue.id)
         assert result["undone"] is True
         assert isinstance(result["event_type"], str)
         assert isinstance(result["event_id"], int)
@@ -1001,13 +1019,13 @@ class TestIssueWithUnblockedShape:
 class TestClaimNextResponseShape:
     def test_keys_match(self, db: FiligreeDB) -> None:
         issue = db.create_issue("Test", type="task")
-        result = ClaimNextResponse(**issue_to_public(issue), selection_reason="P2 ready issue")
+        result = ClaimNextResponse(**issue_to_public(issue), selection_reason="P2 ready issue", already_holding=False)
         hints = get_type_hints(ClaimNextResponse)
         assert set(result.keys()) == set(hints.keys())
 
     def test_value_types(self, db: FiligreeDB) -> None:
         issue = db.create_issue("Test", type="task")
-        result = ClaimNextResponse(**issue_to_public(issue), selection_reason="P2 ready issue")
+        result = ClaimNextResponse(**issue_to_public(issue), selection_reason="P2 ready issue", already_holding=False)
         assert isinstance(result["selection_reason"], str)
 
 

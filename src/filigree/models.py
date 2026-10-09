@@ -52,7 +52,9 @@ class Issue:
     updated_at: ISOTimestamp = _EMPTY_TS
     closed_at: ISOTimestamp | None = None
     # Opaque ``branch@sha`` commit anchors (warpline seam, contract B). Set at
-    # claim / close from a caller-supplied value, stored verbatim, never parsed.
+    # claim / close from a caller-supplied value and stored verbatim. The close
+    # path reads the sha out of ``close_commit`` only for its advisory
+    # reachability check (Task 0.6); the stored value is never rewritten.
     claim_commit: str | None = None
     close_commit: str | None = None
     description: str = ""
@@ -66,6 +68,17 @@ class Issue:
     children: list[str] = field(default_factory=list)
     status_category: StatusCategory = "open"
     data_warnings: list[str] = field(default_factory=list)
+    # Transient, never stored or serialized by ``to_dict``: set by
+    # ``claim_next`` / ``start_next_work`` when they hand back a claim the
+    # assignee already holds (made within the 60 s retry window, or replayed by
+    # ``client_request_id``) instead of making a new one (MCP F4). Surfaces
+    # add it to their claim-next responses explicitly.
+    already_holding: bool = False
+    # Transient, never stored or serialized by ``to_dict``: advisory warnings
+    # ``close_issue`` attaches to the issue it just closed (Task 0.6 -- today
+    # only ``commit_not_reachable_from_integration_ref``). Close surfaces merge
+    # them with the closure gate's warnings into the response's ``warnings``.
+    close_warnings: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.status_category not in _VALID_STATUS_CATEGORIES:

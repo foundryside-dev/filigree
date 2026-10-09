@@ -13,14 +13,17 @@ from pathlib import Path
 import click
 
 from filigree.cli_commands.files import finding_group
-from filigree.cli_common import _emit_registry_startup_failure, add_hidden_flat_alias, get_db, refresh_summary
+from filigree.cli_common import ActorCommand, _emit_registry_startup_failure, add_hidden_flat_alias, explicit_actor, get_db, refresh_summary
+from filigree.commit_reachability import is_safe_ref
 from filigree.core import (
     CONF_FILENAME,
     CONFIG_FILENAME,
     DB_FILENAME,
+    DEFAULT_POPULATION,
     EPHEMERAL_MODE,
     FILIGREE_DIR_NAME,
     SUMMARY_FILENAME,
+    VALID_POPULATIONS,
     WEFT_DIR_NAME,
     WEFT_MEMBER_SUBDIR,
     FiligreeDB,
@@ -65,6 +68,37 @@ def _read_project_config_or_exit(filigree_dir: Path) -> ProjectConfig:
         sys.exit(1)
 
 
+def _stdin_is_tty() -> bool:
+    try:
+        return sys.stdin.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+def _resolve_new_project_population(population: str | None) -> str:
+    """Pick the population tag for a freshly created project.
+
+    Explicit ``--population`` wins. Without it a human at a TTY must choose
+    (prompted until valid); anywhere else (agents, CI, ``--json`` pipelines)
+    there is nobody to ask, so default to ``product-use`` and log a warning so
+    the silent default is visible.
+    """
+    if population is not None:
+        return population
+    if _stdin_is_tty():
+        return str(
+            click.prompt(
+                "Population this project's call log describes",
+                type=click.Choice(list(VALID_POPULATIONS)),
+            )
+        )
+    logging.getLogger(__name__).warning(
+        "init: --population not given and no TTY to ask; defaulting to %r. Change it with `filigree config set population <value>`.",
+        DEFAULT_POPULATION,
+    )
+    return DEFAULT_POPULATION
+
+
 @click.command()
 @click.option("--prefix", default=None, help="ID prefix for issues (default: directory name)")
 @click.option("--name", default=None, help="Human-readable project name (default: directory name)")
@@ -74,7 +108,15 @@ def _read_project_config_or_exit(filigree_dir: Path) -> ProjectConfig:
     default=None,
     help="Installation mode (default: ephemeral; ethereal is the pre-3.3.0 alias)",
 )
-def init(prefix: str | None, name: str | None, mode: str | None) -> None:
+@click.option(
+    "--population",
+    type=click.Choice(list(VALID_POPULATIONS)),
+    default=None,
+    help="Which population this project's call log describes. Asked for at a TTY when absent; "
+    "defaults to product-use (with a logged warning) otherwise. Re-init of a project without a "
+    "tag asks/defaults the same way; an existing tag is only changed by an explicit flag.",
+)
+def init(prefix: str | None, name: str | None, mode: str | None, population: str | None) -> None:
     """Initialize filigree in the current directory (store at .weft/filigree/)."""
     cwd = Path.cwd()
     # The mutating init/install path must NOT boot on defaults over an unreadable
@@ -246,6 +288,13 @@ def init(prefix: str | None, name: str | None, mode: str | None) -> None:
             config["mode"] = mode
             updated = True
             click.echo(f"  Mode: {mode}")
+        # Explicit --population always wins; otherwise a project with no tag yet
+        # gets one now (TTY: ask; non-TTY: product-use default + warning).
+        if population is not None or "population" not in config:
+            population = _resolve_new_project_population(population)
+            config["population"] = population
+            updated = True
+            click.echo(f"  Population: {population}")
         if updated:
             write_config(store_dir, config)
 
@@ -282,6 +331,7 @@ def init(prefix: str | None, name: str | None, mode: str | None) -> None:
     prefix = prefix or cwd.name
     name = name or cwd.name
     mode = normalize_mode(mode) if mode else EPHEMERAL_MODE
+    population = _resolve_new_project_population(population)
     # Honour an operator weft.toml [filigree].store_dir override at creation time
     # (it is the canonical relocation key) so the store, config, and the conf's
     # db field all land in the SAME place. resolve_store_dir already narrowed it
@@ -299,7 +349,7 @@ def init(prefix: str | None, name: str | None, mode: str | None) -> None:
     # presence of ``.weft/filigree/`` itself. No ``.filigree.conf`` is written
     # — filigree only ever *reads* a legacy conf to one-shot-import-and-retire
     # it (the already-installed branch above). ``weft.toml`` is never written.
-    config = {"prefix": prefix, "name": name, "version": 1, "mode": mode}
+    config = {"prefix": prefix, "name": name, "version": 1, "mode": mode, "population": population}
     write_config(store_dir, config)
 
     db = FiligreeDB(store_dir / DB_FILENAME, prefix=prefix, project_root=cwd, meta_dir=store_dir)
@@ -314,10 +364,33 @@ def init(prefix: str | None, name: str | None, mode: str | None) -> None:
     click.echo(f"Initialized filigree store at {rel_store.as_posix()}/ in {cwd}")
     click.echo(f"  Prefix: {prefix}")
     click.echo(f"  Mode: {mode}")
+    click.echo(f"  Population: {population}")
     click.echo(f"  Database: {store_dir / DB_FILENAME}")
     click.echo(f"  Anchor: {rel_store.as_posix()}/ (store-dir presence; confless — no .filigree.conf)")
     click.echo(f"  Scanners: {store_dir / 'scanners'}/ (add .toml files to register scanners)")
     click.echo("\nNext: filigree install")
+
+
+def _install_hook_actor(ctx: click.Context) -> str | None:
+    """Actor for the SessionStart hook: an explicit ``--actor``, else ``FILIGREE_ACTOR``, else None.
+
+    None leaves the hook installer to keep whatever actor an earlier install
+    recorded (or write the plain command when there is none).
+    """
+    actor = explicit_actor(ctx)
+    if actor is not None:
+        return actor
+    from filigree.hooks import ACTOR_ENV_VAR
+    from filigree.validation import sanitize_actor
+
+    env_actor = os.environ.get(ACTOR_ENV_VAR, "")
+    if not env_actor.strip():
+        return None
+    cleaned, err = sanitize_actor(env_actor)
+    if err:
+        click.echo(f"Warning: ignoring {ACTOR_ENV_VAR} for the session hook: {err}", err=True)
+        return None
+    return cleaned
 
 
 def _run_install_step(name: str, installer: Callable[[], tuple[bool, str]]) -> tuple[str, bool, str]:
@@ -329,7 +402,7 @@ def _run_install_step(name: str, installer: Callable[[], tuple[bool, str]]) -> t
     return name, ok, msg
 
 
-@click.command()
+@click.command(cls=ActorCommand)
 @click.option("--claude-code", is_flag=True, help="Install MCP for Claude Code only")
 @click.option("--codex", is_flag=True, help="Install MCP for Codex only")
 @click.option(
@@ -348,7 +421,15 @@ def _run_install_step(name: str, installer: Callable[[], tuple[bool, str]]) -> t
     default=None,
     help="Installation mode (default: preserve existing or ephemeral; ethereal is the pre-3.3.0 alias)",
 )
+@click.option(
+    "--no-actor",
+    "no_actor",
+    is_flag=True,
+    help="Write the SessionStart hook as plain `filigree session-context`, dropping any recorded actor",
+)
+@click.pass_context
 def install(
+    ctx: click.Context,
     claude_code: bool,
     codex: bool,
     claude_md: bool,
@@ -358,12 +439,20 @@ def install(
     skills_only: bool,
     codex_skills_only: bool,
     mode: str | None,
+    no_actor: bool,
 ) -> None:
     """Install filigree into the current project.
 
     With no flags, installs everything: MCP servers, instructions, gitignore, hooks, skills.
     With specific flags, installs only the selected components.
+
+    ``--actor`` (either position; else ``FILIGREE_ACTOR``) is written into the
+    SessionStart hook as ``filigree --actor <id> session-context`` so the
+    session banner scopes your own claims; an existing hook keeps its actor
+    unless ``--no-actor`` is passed, which writes the plain command.
     """
+    if no_actor and explicit_actor(ctx) is not None:
+        raise click.UsageError("--actor and --no-actor are mutually exclusive")
     from filigree.install import (
         ensure_filigree_dir_gitignore,
         ensure_gitignore,
@@ -467,7 +556,11 @@ def install(
         (
             install_all or hooks_only,
             "Claude Code hooks",
-            lambda: install_claude_code_hooks(project_root),
+            lambda: (
+                install_claude_code_hooks(project_root, clear_actor=True)
+                if no_actor
+                else install_claude_code_hooks(project_root, actor=_install_hook_actor(ctx))
+            ),
         ),
         (
             install_all or skills_only,
@@ -521,6 +614,16 @@ def install(
         sys.exit(1)
 
     click.echo('Next: filigree create "My first issue"')
+
+
+# ActorCommand injects a generic post-verb ``--actor``; on ``install`` it also
+# decides the SessionStart hook's actor, so say so (and name the way out).
+for _param in install.params:
+    if _param.name == ActorCommand._ACTOR_DEST and isinstance(_param, click.Option):
+        _param.help = (
+            "Actor written into the SessionStart hook (`filigree --actor <id> session-context`); "
+            "default FILIGREE_ACTOR, else the hook's existing actor. --no-actor removes it."
+        )
 
 
 def _emit_doctor_json(
@@ -651,6 +754,30 @@ def _apply_doctor_fixes(
     fixed = 0
     fixed_check_ids: set[str] = set()
     fixed_check_names: set[str] = set()
+
+    # Published token file vs active env token (HTTP F14): realign the file to
+    # the env value siblings must send. Routed by stable code; the unconditional
+    # mint above reuses an existing (stale) file, so it does not cover this.
+    for r in results:
+        if r.passed or r.code != "federation_token_file_mismatch" or r.fix_target is None:
+            continue
+        from filigree.federation_token import reconcile_token_file
+
+        # fix_target is the exact dir the check compared (project store, or the
+        # server config dir in server mode) — reconcile that file, not a re-derived one.
+        outcome = reconcile_token_file(Path(r.fix_target))
+        ok = outcome.reconciled
+        if emit is not None:
+            if ok:
+                detail = f"rewrote {FEDERATION_TOKEN_FILENAME} to the active {outcome.env_name}"
+            else:
+                detail = f"not reconciled ({outcome.status.value})"
+            emit(f"  {'OK' if ok else '!!'} {r.name}: {detail}")
+        if ok:
+            fixed += 1
+            fixed_check_ids.add(doctor_check_id(r))
+            fixed_check_names.add(r.name)
+
     for r in results:
         if r.passed or r.name not in fixable:
             continue
@@ -757,6 +884,39 @@ def _apply_doctor_fixes(
                 fixed_check_names.add(r.name)
                 if emit is not None:
                     emit(f"  OK {r.name}: Unregistered stale project {r.fix_target}")
+
+    # Empty legacy "Future" releases (the retired init seed): routed by stable
+    # code, deleted by exact issue id. Re-verified as childless/link-free by the
+    # check that produced them; ``force`` is needed only because the release is
+    # not in a terminal state.
+    futures = [r for r in results if not r.passed and r.code == "empty_future_release" and r.fix_target is not None]
+    if futures:
+        conf_path = project_root / CONF_FILENAME
+        try:
+            db = (
+                FiligreeDB.from_conf(conf_path, store_dir=filigree_dir)
+                if conf_path.is_file()
+                else FiligreeDB.from_store_dir(filigree_dir, project_root=project_root)
+            )
+        except Exception as e:
+            if emit is not None:
+                click.echo(f"  !!  Cannot fix {futures[0].name}: {e}", err=True)
+        else:
+            try:
+                for r in futures:
+                    try:
+                        db.delete_issue(str(r.fix_target), force=True, actor="doctor")
+                    except Exception as e:
+                        if emit is not None:
+                            click.echo(f"  !!  Cannot fix {r.name}: {e}", err=True)
+                        continue
+                    fixed += 1
+                    fixed_check_ids.add(doctor_check_id(r))
+                    fixed_check_names.add(r.name)
+                    if emit is not None:
+                        emit(f"  OK {r.name}: Deleted empty Future release {r.fix_target}")
+            finally:
+                db.close()
 
     return fixed, fixed_check_ids, fixed_check_names
 
@@ -925,12 +1085,18 @@ def dashboard(
 
 
 @click.command("session-context")
-def session_context() -> None:
-    """Output project snapshot for Claude Code session context."""
+@click.pass_context
+def session_context(ctx: click.Context) -> None:
+    """Output project snapshot for Claude Code session context.
+
+    Pass the group-level ``--actor`` (or set ``FILIGREE_ACTOR``) to scope the
+    in-progress section to that agent's own claims.
+    """
     try:
         from filigree.hooks import generate_session_context
 
-        context = generate_session_context()
+        actor = ctx.obj["actor"] if ctx.obj and ctx.obj.get("actor_explicit") else None
+        context = generate_session_context(actor)
         if context:
             click.echo(context)
     except Exception:
@@ -1200,9 +1366,50 @@ def compact(keep: int, as_json: bool) -> None:
                 click.echo("Vacuumed database")
 
 
+@click.group("config")
+def config_group() -> None:
+    """Read and write project configuration keys."""
+
+
+@config_group.command("set")
+@click.argument("key")
+@click.argument("value")
+def config_set(key: str, value: str) -> None:
+    """Set a project config key. Settable: ``population``, ``integration_ref``.
+
+    \b
+    filigree config set population suite-construction
+    filigree config set population product-use
+    filigree config set integration_ref main
+    """
+    if key == "population":
+        if value not in VALID_POPULATIONS:
+            raise click.UsageError(f"Invalid population {value!r}. Valid values: {', '.join(VALID_POPULATIONS)}")
+    elif key == "integration_ref":
+        # The branch close-time commit anchors are checked against, as
+        # origin/<integration_ref> (Task 0.6). Reaches git as an argv element.
+        if not is_safe_ref(value):
+            raise click.UsageError(f"Invalid integration_ref {value!r}: not a safe git branch name")
+    else:
+        raise click.UsageError(f"Unsupported config key {key!r}. Settable keys: population, integration_ref")
+    try:
+        store_dir = find_filigree_anchor().store_dir
+    except ProjectNotInitialisedError as exc:
+        click.echo(str(exc), err=True)
+        sys.exit(1)
+    config = _read_project_config_or_exit(store_dir)
+    if key == "population":
+        config["population"] = value
+    else:
+        config["integration_ref"] = value
+    write_config(store_dir, config)
+    click.echo(f"{key} = {value}")
+
+
 def register(cli: click.Group) -> None:
     """Register admin commands with the CLI group."""
     cli.add_command(init)
+    cli.add_command(config_group)
     cli.add_command(install)
     cli.add_command(doctor)
     cli.add_command(migrate)

@@ -11,7 +11,10 @@ import json
 import sqlite3
 from datetime import UTC, datetime, timedelta
 
+from filigree.commit_reachability import Reachable, parse_stored_value
 from filigree.db_base import DBMixinProtocol, _in_immediate_tx, _now_iso, _retry_busy
+from filigree.models import Issue
+from filigree.types.api import UndoConflictError
 from filigree.types.events import REVERSIBLE_EVENT_TYPES, EventRecord, EventRecordWithTitle, EventType, UndoResult
 
 _UNDO_CLAIM_LEASE_HOURS = 48
@@ -102,6 +105,25 @@ class EventsMixin(DBMixinProtocol):
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT MAX(event_seq) FROM events WHERE issue_id = ?), -1) + 1)",
             (issue_id, event_type, actor, self._verified_actor, old_value, new_value, comment, _now_iso(), issue_id),
         )
+
+    @_in_immediate_tx("record_governance_warning")
+    def record_governance_warning(self, issue_id: str, warning: str, *, actor: str = "filigree:governance") -> bool:
+        """Record a ``governance_warning`` event unless the issue's latest event already is it.
+
+        The closure gate calls this when it lets a governed close proceed with a
+        warning (the retired Legis provider). Skipping an identical latest event
+        keeps repeated gate evaluations of the same issue (a retried or failed
+        close, a re-run sweep) from stacking duplicate audit rows. Returns True
+        when an event was written.
+        """
+        latest = self.conn.execute(
+            "SELECT event_type, new_value FROM events WHERE issue_id = ? ORDER BY event_seq DESC, id DESC LIMIT 1",
+            (issue_id,),
+        ).fetchone()
+        if latest is not None and latest["event_type"] == "governance_warning" and latest["new_value"] == warning:
+            return False
+        self._record_event(issue_id, "governance_warning", actor=actor, new_value=warning)
+        return True
 
     def get_recent_events(self, limit: int = 20) -> list[EventRecordWithTitle]:
         rows = self.conn.execute(
@@ -299,14 +321,79 @@ class EventsMixin(DBMixinProtocol):
         ).fetchall()
         return [self._build_event_record(r) for r in rows]
 
-    def undo_last(self, issue_id: str, *, actor: str = "") -> UndoResult:
+    def get_close_commit_reachable(self, issue: Issue) -> Reachable | None:
+        """Return the stored reachability verdict for *issue*'s ``close_commit``.
+
+        ``True`` / ``False`` / ``"unknown"`` from the newest ``close_commit_checked``
+        event for the anchor currently stored (Task 0.6); ``None`` when the issue
+        carries no close anchor or it predates the check.
+        """
+        if issue.close_commit is None:
+            return None
+        row = self.conn.execute(
+            "SELECT new_value FROM events WHERE issue_id = ? AND event_type = 'close_commit_checked' AND old_value = ? "
+            "ORDER BY created_at DESC, id DESC LIMIT 1",
+            (issue.id, issue.close_commit),
+        ).fetchone()
+        return parse_stored_value(row["new_value"]) if row is not None else None
+
+    def _undo_candidate_row(self, issue_id: str) -> sqlite3.Row | None:
+        """Return the event ``undo_last`` would reverse next, or None.
+
+        The most recent reversible event not already covered by an ``undone``
+        marker. Filtering already-undone events here (not after) lets undo fall
+        back to earlier reversible history once the newest one is undone.
+        """
+        rev_ph = ",".join("?" * len(_REVERSIBLE_EVENTS))
+        row: sqlite3.Row | None = self.conn.execute(
+            f"SELECT * FROM events e WHERE e.issue_id = ? AND e.event_type IN ({rev_ph}) "
+            f"AND NOT EXISTS ("
+            f"  SELECT 1 FROM events u WHERE u.issue_id = e.issue_id "
+            f"  AND u.event_type = 'undone' AND u.new_value = CAST(e.id AS TEXT)"
+            f") "
+            f"ORDER BY e.created_at DESC, e.id DESC LIMIT 1",
+            (issue_id, *_REVERSIBLE_EVENTS),
+        ).fetchone()
+        return row
+
+    def undo_candidate_event_id(self, issue_id: str) -> int | None:
+        """Return the id of the event ``undo_last`` would reverse next, or None.
+
+        This is the value ``undo_last`` expects as ``expected_event_id``.
+        Raises ``KeyError`` when the issue does not exist.
+        """
+        self.get_issue(issue_id)
+        row = self._undo_candidate_row(issue_id)
+        return None if row is None else int(row["id"])
+
+    def undo_last(self, issue_id: str, *, actor: str = "", expected_event_id: int, override: bool = False) -> UndoResult:
         """Undo the most recent reversible event for an issue.
 
-        Returns dict with 'undone' bool and details. Only reverses the single
-        most recent reversible event — 'undone' events are not themselves
-        undoable, preventing undo chains.
+        A compare-and-swap on the event to reverse (MCP F1): ``expected_event_id``
+        must be the id of the event undo would reverse (the newest reversible
+        event not yet undone — see ``undo_candidate_event_id``; agents read it
+        from ``issue_event_list``). A stale id raises ``UndoConflictError`` with
+        ``details.latest_event_id``, so a retried undo can never walk back one
+        more event than its caller saw.
+
+        Holder check: when the issue carries a live claim (non-empty assignee
+        on a non-done-category issue — a done issue's assignee is closure audit
+        trail, as in ``release_claim``), only the holder may undo. Anyone else
+        gets ``UndoConflictError`` with ``details.holder`` unless ``override``
+        is true (coordinator); an overriding undo records
+        ``{"override": true, "holder": ...}`` as the ``undone`` event's comment.
+
+        Returns ``{"result": "no_op", "reason": "no_reversible_event"}`` when
+        nothing is left to reverse. Only reverses the single event —
+        ``undone`` events are not themselves undoable, preventing undo chains.
         """
-        current = self.get_issue(issue_id)
+        if isinstance(expected_event_id, bool) or not isinstance(expected_event_id, int):
+            msg = "expected_event_id must be an integer"
+            raise ValueError(msg)
+        if not isinstance(override, bool):
+            msg = "override must be a boolean"
+            raise ValueError(msg)
+        self.get_issue(issue_id)  # raises KeyError if not found
         now = _now_iso()
 
         # Acquire SQLite's write lock before the candidate SELECT so the
@@ -321,23 +408,23 @@ class EventsMixin(DBMixinProtocol):
             opened_txn = True
 
         try:
-            # Find the most recent reversible event that has not already been
-            # covered by an 'undone' marker. Filtering already-undone events at
-            # SELECT time (not after) lets undo fall back to earlier reversible
-            # history when the newest reversible event has been undone already.
-            rev_ph = ",".join("?" * len(_REVERSIBLE_EVENTS))
-            row = self.conn.execute(
-                f"SELECT * FROM events e WHERE e.issue_id = ? AND e.event_type IN ({rev_ph}) "
-                f"AND NOT EXISTS ("
-                f"  SELECT 1 FROM events u WHERE u.issue_id = e.issue_id "
-                f"  AND u.event_type = 'undone' AND u.new_value = CAST(e.id AS TEXT)"
-                f") "
-                f"ORDER BY e.created_at DESC, e.id DESC LIMIT 1",
-                (issue_id, *_REVERSIBLE_EVENTS),
-            ).fetchone()
+            # Read the issue under the lock: the holder check and the reversal
+            # below must see the same row the write will touch.
+            current = self.get_issue(issue_id)
+            row = self._undo_candidate_row(issue_id)
 
             if row is None:
-                return {"undone": False, "reason": "No reversible events to undo"}
+                return {"result": "no_op", "reason": "no_reversible_event"}
+
+            if row["id"] != expected_event_id:
+                raise UndoConflictError.stale_event(issue_id, expected_event_id=expected_event_id, latest_event_id=row["id"])
+
+            holder = current.assignee or ""
+            undo_comment = ""
+            if holder and holder != actor and self._resolve_status_category(current.type, current.status) != "done":
+                if not override:
+                    raise UndoConflictError.held_by_other(issue_id, holder=holder, actor=actor)
+                undo_comment = json.dumps({"override": True, "holder": holder})
 
             event_type = row["event_type"]
             event_id = row["id"]
@@ -553,6 +640,7 @@ class EventsMixin(DBMixinProtocol):
                 actor=actor,
                 old_value=event_type,
                 new_value=str(event_id),
+                comment=undo_comment,
             )
             self.conn.commit()
         except Exception:

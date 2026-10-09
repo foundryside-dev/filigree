@@ -112,6 +112,10 @@ that blocks it.
 | `issue_id` | string | yes | Issue ID |
 | `include_transitions` | boolean | no | Include valid next states in response |
 
+The response includes `close_commit_reachable`: `true`, `false` or `"unknown"`
+from the reachability check run when the issue was closed with a commit anchor
+(see `issue_close`), or `null` when the issue has no close anchor.
+
 #### `issue_list`
 
 | Parameter | Type | Required | Description |
@@ -175,6 +179,20 @@ the observed holder; mismatches return `CONFLICT` and name both holders.
 | `actor` | string | no | Agent identity for audit trail |
 | `expected_assignee` | string | no | Override expected holder for coordinator writes |
 | `force` | boolean | no | Use the declared reverse/escape edge for cleanup closes |
+| `commit` | string | no | Commit anchor `branch@sha`, stored verbatim as `close_commit` |
+
+When `commit` is given, Filigree checks whether its sha is an ancestor of
+`origin/<integration_ref>` (config key `integration_ref`, default `main`),
+after a bounded `git fetch` in the project root. If it is not (for example, a
+branch that never merged, a squash-merged branch sha, or, in a full clone, a
+sha git has no object for), the issue still closes and the response carries
+`warnings: ["commit_not_reachable_from_integration_ref: <sha> not in origin/<ref>"]`.
+If git cannot answer (no checkout, git missing, fetch failed, shallow clone,
+ambiguous sha prefix), the verdict is `unknown` and no warning is added. The
+check runs off the event loop. The verdict is stored
+on a `close_commit_checked` event and shown as `close_commit_reachable` on
+`issue_get`.
+`warnings` is omitted when empty.
 
 `force=true` validates against template `reverse_transitions` and emits
 `transition_forced`; normal close validation remains forward-only.
@@ -184,10 +202,14 @@ When an issue has active `critical=true` annotations linked with
 an `annotation_warnings` array. Each warning contains the `annotation_id`,
 file anchor, computed `anchor_state`, and suggested follow-up tools.
 
-Issues with signed Legis entity bindings pass through the closure gate first.
-A non-PROCEED verdict comes back as an error envelope whose `error` is the
-gate reason: `code: CONFLICT` for a blocked, stale, contract-violation or
-Legis-unavailable verdict, `INTERNAL` for a ledger integrity failure. The same
+Issues with signed entity bindings pass through the closure gate first.
+Legis is retired and is never consulted: when `LEGIS_URL` is set, a governed
+close with fresh bindings proceeds, a `governance_warning` event
+(`governance_provider_archived: ...`) is recorded on the issue, the server
+logs a warning, and the same text is returned in the close response's
+`warnings[]`. A drifted binding (the bound content changed since it
+was signed or attached) is a non-PROCEED verdict and comes back as an error
+envelope whose `error` is the gate reason, `code: CONFLICT`. The same
 mapping applies per item in `issue_batch_close` and to a closing status write
 through `issue_update`. When Loomweave reported a governed SEI orphaned
 (`alive:false`) and knows its latest lineage event, the reason is suffixed
@@ -208,9 +230,20 @@ block.
 
 #### `admin_undo_last`
 
+Undo is a compare-and-swap on the event to reverse. Read the issue's events
+with `issue_event_list` and pass the `event_id` of the newest reversible event
+as `expected_event_id`. If that is not the event undo would reverse, the call
+returns `CONFLICT` with `details.latest_event_id` and changes nothing, so a
+retried undo never walks back a second event. When another actor holds a live
+claim on the issue, the call returns `CONFLICT` with `details.holder` unless
+`override=true` (coordinator; recorded on the `undone` event). Nothing left to
+reverse returns `{"result": "no_op", "reason": "no_reversible_event"}`.
+
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `issue_id` | string | yes | Issue ID |
+| `expected_event_id` | integer | yes | `event_id` of the event to reverse (from `issue_event_list`) |
+| `override` | boolean | no | Coordinator undo of an issue whose live claim another actor holds |
 | `actor` | string | no | Agent identity for audit trail |
 
 ### Ready and Blocked
@@ -365,7 +398,7 @@ Step deps within a phase use integer indices. Cross-phase deps use `"phase_idx.s
 | `work_start_next` | Claim highest-priority ready issue and transition it into work (skips non-startable candidates) |
 | `work_claim` | Claim only, with optimistic locking |
 | `work_claim_next` | Claim highest-priority ready issue only |
-| `work_release` | Release a claim, optionally idempotently with `if_held` |
+| `work_release` | Release a claim you hold (holder-checked; `override` for coordinators; unassigned is a no-op) |
 | `work_release_mine` | Bulk-release every live claim held by one actor |
 | `work_heartbeat` | Refresh claim liveness for active work |
 | `work_stale_list` | List assigned work with expired leases or old legacy assignments |
@@ -399,6 +432,16 @@ skipped. Pass `advance=true` to make them startable via the multi-hop soft walk.
 | `target_status` | string | no | Working status override |
 | `advance` | boolean | no | Walk soft transitions to wip so multi-hop types (e.g. `triage` bugs) become startable instead of skipped. Default `false`. |
 | `actor` | string | no | Agent identity (defaults to assignee) |
+| `client_request_id` | string | no | Idempotency key: a retry with the same id returns the issue that request claimed, if still held |
+
+`work_start_next` and `work_claim_next` are retry-safe. When the assignee
+claimed an issue within the last 60 seconds and still holds it in progress
+(`work_claim_next`: any live claim), that issue is returned with
+`already_holding: true` and nothing is written, instead of claiming a second
+issue. A retry with the same `client_request_id` gets the issue that request
+claimed back at any age. An older held claim does not block new work: the
+call claims the next ready issue. Every success response carries
+`already_holding`.
 
 #### `work_claim`
 
@@ -417,15 +460,25 @@ skipped. Pass `advance=true` to make them startable via the multi-hop soft walk.
 | `priority_min` | 0-4 | no | Minimum priority |
 | `priority_max` | 0-4 | no | Maximum priority |
 | `actor` | string | no | Agent identity (defaults to assignee) |
+| `client_request_id` | string | no | Idempotency key: a retry with the same id returns the issue that request claimed, if still held |
 
 #### `work_release`
+
+Holder-checked: `actor` must be the current holder; a claim held by anyone
+else returns `CONFLICT` and is left alone. `expected_assignee` is an extra
+compare-and-swap guard, never authorization — naming the holder does not let a
+non-holder release. To free a peer's stale claim use `work_reclaim`; `override=true`
+is the coordinator release, recorded as a `released_by_override` event.
+Releasing an issue nobody holds returns `{"result": "no_op", "reason":
+"not_claimed"}`. The former `if_held` parameter was removed (3.4.0); passing
+it returns `VALIDATION` with `details.migration`.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `issue_id` | string | yes | Issue ID |
-| `actor` | string | no | Agent identity for audit trail |
-| `if_held` | boolean | no | Idempotent release-if-held mode; unassigned issues are returned unchanged, but held-by-other mismatches return `CONFLICT` |
-| `expected_assignee` | string | no | Only release when the current assignee matches this value; defaults to `actor` in `if_held` mode |
+| `actor` | string | no | Agent identity; must be the current holder unless `override` |
+| `expected_assignee` | string | no | Extra CAS guard: the current holder must also equal it (mismatch is `CONFLICT`, even with `override`); never authorizes a non-holder |
+| `override` | boolean | no | Coordinator release of a claim `actor` does not hold |
 | `reason` | string | no | Audit reason recorded on the release event |
 
 #### `work_release_mine`
@@ -445,9 +498,13 @@ skipped. Pass `advance=true` to make them startable via the multi-hop soft walk.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `issue_id` | string | yes | Issue ID |
-| `actor` | string | no | Agent identity for audit trail and default holder check |
-| `expected_assignee` | string | no | Only heartbeat when the current assignee matches this value |
+| `actor` | string | yes | Agent identity; must be the current holder unless `override` is true. Omitting it returns `VALIDATION` |
+| `expected_assignee` | string | no | Extra compare-and-swap guard: the current assignee must also equal this value. Never authorizes a non-holder |
+| `override` | boolean | no | Coordinator refresh of a claim `actor` does not hold; recorded as a `heartbeat_by_override` event |
 | `lease_hours` | integer | no | Lease duration from this heartbeat (default 48) |
+
+Holder-checked: a heartbeat by anyone other than the holder returns `CONFLICT`,
+so a peer cannot keep an abandoned claim's lease alive.
 
 #### `work_stale_list`
 
@@ -653,7 +710,7 @@ No parameters. Returns connector health fields including `status`, `db_initializ
 | `db_checkpoint` | Run `PRAGMA wal_checkpoint(TRUNCATE)` on the project store |
 | `admin_archive_closed` | Archive old closed issues |
 | `admin_compact_events` | Compact event history |
-| `reconciliation_debt_list` | List issues carrying reconciliation debt (governed cascade closes the Legis gate deferred) |
+| `reconciliation_debt_list` | List issues carrying reconciliation debt (governed cascade closes the closure gate deferred because a bound entity drifted, or that failed) |
 
 #### `reconciliation_debt_list`
 
@@ -674,7 +731,8 @@ agent's artifacts.
    dry_run=true)`, then repeat with `dry_run=false` and a `reason` once the
    preview is right. Use `label_prefix` only when the prefix is unique enough
    for the session. A claim held by another actor is a `CONFLICT`, not a
-   release-if-held no-op; investigate it before retrying as a coordinator.
+   no-op; investigate it before retrying as a coordinator (`work_reclaim`, or
+   `work_release` with `override=true`).
 3. List pending notes with `observation_list(actor=...)`, then use
    `observation_promote_to_issue`, `observation_batch_link`, or
    `observation_batch_dismiss` so observations are either tracked, attached as
@@ -872,9 +930,10 @@ is required (or accepted).
 
 ### Federation Consumer Bindings
 
-The write-capable half of the warpline↔filigree seam (Seam 2A of the
-2026-06-13 warpline interface lock). warpline produces a reverify worklist and
-never auto-files; Filigree consumes it on explicit action.
+The write-capable half of the seam with the archived Warpline producer. Warpline was archived on
+2026-10-01; this consumer stays in 3.x for any worklist already produced and is
+removed in 4.0. The producer never auto-filed; Filigree consumes a worklist only
+on explicit action.
 
 | Tool | Description |
 |------|-------------|
@@ -883,10 +942,10 @@ never auto-files; Filigree consumes it on explicit action.
 #### `warpline_worklist_ingest`
 
 Each filed item carries the `warpline` + `federation` producer labels and an
-entity association on the item's SEI — the same surface warpline reads back via
-`entity_association_list_by_entity`, so a filed item shows up as tracked on the
-next worklist (the loop closes). Previews by default; `apply=true` performs the
-writes.
+entity association on the item's SEI — the surface the (archived) Warpline
+producer read back via `entity_association_list_by_entity`, so a filed item
+showed up as tracked on its next worklist. Previews by default; `apply=true`
+performs the writes.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -980,7 +1039,7 @@ instead of acknowledging an unrelated issue.
 
 #### `scanner_list`
 
-No parameters. Returns scanners registered in `.filigree/scanners/*.toml` in
+No parameters. Returns scanners registered in `.weft/filigree/scanners/*.toml` in
 the unified list envelope:
 `{items: [{name, description, file_types, accepts_prompt, prompt_pack_aware, prompt_packs_endpoint, applicable_prompts, bundled_name, bundled_match, managed, sandbox_class, sandbox_summary, ...}], has_more: bool}`.
 If the list is empty, call `scanner_available_list` to see bundled scanners
@@ -999,7 +1058,7 @@ project, including `command_available`, `command_path`, `enabled`,
 | `scanner` | string | yes | Bundled scanner name, e.g. `codex` or `claude` |
 | `force` | boolean | no | Replace an existing custom or stale bundled TOML |
 
-Writes the managed `.filigree/scanners/<scanner>.toml` registration for a
+Writes the managed `.weft/filigree/scanners/<scanner>.toml` registration for a
 bundled scanner. Refuses to overwrite custom TOML unless `force=true`. If the
 packaged runner command is not on `PATH`, the response includes
 `command_available=false` and a warning with the `uv tool install --upgrade
@@ -1112,7 +1171,7 @@ create a linked triage observation; full responses then include
 
 **Rate limiting:** Repeated triggers for the same scanner+file are rejected within a 30s cooldown window.
 
-**Important:** Results are POSTed to the dashboard API at `/api/scan-results`, the living alias for the recommended Weft generation. Without an explicit `api_url`, scanners use the active local dashboard: ephemeral mode reads `.filigree/ephemeral.port`, server mode reads the configured daemon port, and the legacy `http://localhost:8377` default is only used when no active ephemeral port has been recorded. Ensure the target is reachable before triggering scans — if unreachable, results are silently lost.
+**Important:** Results are POSTed to the dashboard API at `/api/scan-results`, the living alias for the recommended Weft generation. Without an explicit `api_url`, scanners use the active local dashboard: ephemeral mode reads `.weft/filigree/ephemeral.port`, server mode reads the configured daemon port, and the legacy `http://localhost:8377` default is only used when no active ephemeral port has been recorded. Ensure the target is reachable before triggering scans — if unreachable, results are silently lost.
 
 External scanner producers should include a globally unique, non-empty
 `scan_run_id` in scan-results POSTs when they want `GET /api/scan-runs`
@@ -1125,7 +1184,7 @@ posted finding's `fingerprint` field before POSTing. Filigree preserves that
 `finding.fingerprint` through readback, promote-by-fingerprint, dedup, stale
 cleanup, and reopen-on-regress lifecycle transitions.
 
-**Scanner registration:** Use `scanner_available_list`, `scanner_enable`, and `scanner_disable` from MCP, or `filigree scanner available`, `filigree scanner enable <name>`, and `filigree scanner disable <name>` from the CLI. Bundled scanners call installed `filigree-scanner-*` entrypoints, so projects do not need copied runner scripts. Custom scanners can still be added as TOML files under `.filigree/scanners/`. Custom scanners that declare `{prompt}` in their args template are expected to honor that prompt value themselves.
+**Scanner registration:** Use `scanner_available_list`, `scanner_enable`, and `scanner_disable` from MCP, or `filigree scanner available`, `filigree scanner enable <name>`, and `filigree scanner disable <name>` from the CLI. Bundled scanners call installed `filigree-scanner-*` entrypoints, so projects do not need copied runner scripts. Custom scanners can still be added as TOML files under `.weft/filigree/scanners/`. Custom scanners that declare `{prompt}` in their args template are expected to honor that prompt value themselves.
 
 **Prompt packs:** Use `prompt_pack_list` or `filigree scanner prompts` to list bundled review lenses. Agents can pass `prompt` to `scan_preview`, `scan_trigger`, or `scan_trigger_batch` to focus review without embedding long scanner instructions in their own prompt. Bundled packs include `security`, `pytorch`, `quality-engineering`, `solution-architecture`, `systems-thinking`, `system-interactions`, `python-engineering`, `css`, `javascript`, `typescript`, `react`, `rust`, `go`, `terraform`, `sql`, `comprehensive`, and `major-refactor`. Pack records include `language`, `expected_relative_cost`, `instructions`, and `prompt_pack_scope`; scanner records include `applicable_prompts` so agents do not need to infer language fit from names. The prompt pack only nudges model focus; file access is governed by the scanner CLI sandbox.
 

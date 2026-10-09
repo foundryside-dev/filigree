@@ -98,7 +98,7 @@ class TestMCPUnknownParameterValidation:
         issue = mcp_db.create_issue("Target")
         result = await call_tool(
             "admin_undo_last",
-            {"issue_id": issue.id, "actor": "a" * 129},
+            {"issue_id": issue.id, "actor": "a" * 129, "expected_event_id": 1},
         )
         data = _parse(result)
         assert data["code"] == ErrorCode.VALIDATION

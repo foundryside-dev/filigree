@@ -35,6 +35,7 @@ from typing import Any
 
 from filigree.mcp_server import _served_tools
 from filigree.mcp_tools.rename import RENAME_MAP
+from tests.mcp._stale_prose import stale_claims
 
 # Whole-word alternation of every OLD tool name. Longest-first so the regex
 # engine prefers the longest match (cosmetic; \b anchors make it unambiguous).
@@ -82,6 +83,18 @@ def test_no_served_description_names_an_old_tool() -> None:
     assert not offenders, "served prose references old tool names:\n" + "\n".join(offenders)
 
 
+def test_no_served_description_makes_a_stale_claim() -> None:
+    """Task 0.9 (LX-11, LX-14, LX-16): no served description (top-level or
+    parameter) names Legis/Warpline as live ("(warpline seam)" jargon on core
+    tools included), points at ``.filigree/``, claims ``--agent-id`` or
+    documents a stale CONFLICT shape / exit code."""
+    offenders: list[str] = []
+    for tool in _served_tools:
+        for location, text in _iter_descriptions(tool):
+            offenders.extend(f"{location}: {label}" for _line, label in stale_claims(text))
+    assert not offenders, "served prose makes stale claims:\n" + "\n".join(offenders)
+
+
 def test_guard_can_detect_an_old_name() -> None:
     """Sanity: the regex actually fires on a known OLD name and not on its NEW
     successor (substring safety via word boundaries)."""
@@ -89,3 +102,30 @@ def test_guard_can_detect_an_old_name() -> None:
     sample_new = RENAME_MAP[sample_old]
     assert _OLD_NAME_RE.search(f"call {sample_old} to read it")
     assert not _OLD_NAME_RE.search(f"call {sample_new} to read it")
+
+
+# ---------------------------------------------------------------------------
+# Served skill prose: the Stale Claims recipe (Task 0.4, LX-05)
+# ---------------------------------------------------------------------------
+
+_SKILL_REFERENCE = "skills/filigree-workflow/references/team-coordination.md"
+
+
+def _section(markdown: str, heading: str) -> str:
+    """Return the body of the ``### <heading>`` section (up to the next heading)."""
+    match = re.search(rf"^###\s+{re.escape(heading)}\s*$(.*?)(?=^#{{1,3}}\s)", markdown, flags=re.MULTILINE | re.DOTALL)
+    assert match is not None, f"section {heading!r} not found"
+    return match.group(1)
+
+
+def test_stale_claims_recipe_never_releases_a_peer_claim() -> None:
+    """A peer's stale claim is transferred with ``reclaim`` (holder-checked CAS),
+    never freed with ``release`` — releasing another agent's claim is the MCP F3
+    bypass this recipe used to teach."""
+    from importlib.resources import files
+
+    text = (files("filigree") / _SKILL_REFERENCE).read_text(encoding="utf-8")
+    section = _section(text, "Stale Claims")
+    assert "filigree release <issue-id>" not in section
+    assert "filigree stale-claims" in section
+    assert "filigree reclaim <issue-id>" in section

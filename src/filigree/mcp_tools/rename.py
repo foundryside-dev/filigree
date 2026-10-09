@@ -197,3 +197,21 @@ RENAME_MAP: Mapping[str, str] = MappingProxyType(_RENAME_MAP_DATA)
 #: ``RENAME_MAP``; the injectivity guard above guarantees no value collision
 #: silently drops a row, making this a true bijection.
 NEW_TO_OLD: dict[str, str] = {new: old for old, new in RENAME_MAP.items()}
+
+#: Parameter-level tombstones: ``(canonical tool name, removed parameter)`` ->
+#: ``{"renamed_to": <successor or None>, "migration": <what to do instead>}``.
+#: A call still passing a removed parameter gets a VALIDATION envelope whose
+#: ``details`` carry ``parameter`` plus these two keys, instead of the bare
+#: "Unknown parameter(s)" message, so the agent learns the migration in one hop.
+REMOVED_PARAMETERS: Mapping[tuple[str, str], Mapping[str, str | None]] = MappingProxyType(
+    {
+        # Task 0.4 (MCP F3): work_release is holder-checked by default; the
+        # opt-in flag is gone, not aliased.
+        ("release_claim", "if_held"): MappingProxyType(
+            {
+                "renamed_to": None,
+                "migration": "holder check is now the default; use override:true for coordinator release",
+            }
+        ),
+    }
+)
