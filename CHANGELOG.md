@@ -173,8 +173,10 @@ policy (ADR-030) records this as its one pre-4.0 exception.
   Unchanged: governance stays off when `LEGIS_URL` is unset, and the local
   checks still fail closed as `STALE` (a drifted sign-off snapshot, and the
   Loomweave current-code drift check on signed bindings). Removed the
-  `legis_known_down` parameter of `evaluate_closure_gate` (no Legis probe left
-  `error-codes.md`. The Legis client module stays until 4.0. No schema change.
+  `legis_known_down` parameter of `evaluate_closure_gate`, since there is no
+  Legis probe left for it to short-circuit. Removed the Legis closure-gate text
+  from the `filigree-workflow` skill's `error-codes.md`. The Legis client
+  module stays until 4.0. No schema change.
 - **The session banner and READY list no longer overstate available work.**
   `READY TO WORK (n startable of m ready)` now drops container types (release,
   epic, milestone, phase) entirely, lists startable leaves first (so
