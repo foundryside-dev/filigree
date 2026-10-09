@@ -78,16 +78,17 @@ def _issue_write_error_details(exc: BaseException) -> dict[str, Any] | None:
     return _invalid_transition_details(exc)
 
 
-async def _check_close_commit_off_loop(db: FiligreeDB, commit: str | None) -> ReachabilityCheck | None:
+async def _check_close_commit_off_loop(db: FiligreeDB, issue_id: str, commit: str | None) -> ReachabilityCheck | None:
     """Run the close-anchor reachability check (Task 0.6) on a worker thread.
 
     The check shells out to git (fetch + merge-base, up to ~10 s each), so it
     must not run on the event loop. It reads only ``config.json`` and runs git;
     it touches no ``sqlite3.Connection``, so the CONNECTION INVARIANT above is
-    unaffected. Callers await it before their first DB read, so the handler's
-    DB work still runs to completion without an ``await`` in the middle.
+    unaffected. Callers await it before the close's DB work, so that work still
+    runs to completion without an ``await`` in the middle. A close that will
+    404 or refuse as already closed skips git (a cheap read, no transaction).
     """
-    if commit is None:
+    if commit is None or not db.close_commit_check_applies(issue_id):
         return None
     return await asyncio.to_thread(db.check_close_commit, commit)
 
@@ -644,9 +645,9 @@ def create_classic_router() -> APIRouter:
         if commit is not None and not isinstance(commit, str):
             return _error_response("commit must be a string", ErrorCode.VALIDATION, 400)
         fields = body.get("fields")
-        # Task 0.6: git reachability check off the event loop, before any DB
-        # read (see _check_close_commit_off_loop).
-        commit_check = await _check_close_commit_off_loop(db, commit)
+        # Task 0.6: git reachability check off the event loop, before the close's
+        # DB work (see _check_close_commit_off_loop).
+        commit_check = await _check_close_commit_off_loop(db, issue_id, commit)
         try:
             gate = governance.evaluate_closure_gate(db, issue_id)
             if not gate.allowed:
@@ -1506,9 +1507,9 @@ def create_weft_router() -> APIRouter:
         if commit is not None and not isinstance(commit, str):
             return _error_response("commit must be a string", ErrorCode.VALIDATION, 400)
         fields = body.get("fields")
-        # Task 0.6: git reachability check off the event loop, before any DB
-        # read (see _check_close_commit_off_loop).
-        commit_check = await _check_close_commit_off_loop(db, commit)
+        # Task 0.6: git reachability check off the event loop, before the close's
+        # DB work (see _check_close_commit_off_loop).
+        commit_check = await _check_close_commit_off_loop(db, issue_id, commit)
         ready_before = {i.id for i in db.get_ready()}
         try:
             gate = governance.evaluate_closure_gate(db, issue_id)

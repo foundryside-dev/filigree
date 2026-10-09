@@ -352,3 +352,19 @@ class TestCloseReachabilityOffLoop:
 
         await asyncio.gather(_close(), _health())
         assert order == ["health", "close"]
+
+
+class TestCloseWithCommitOnMissingIssue:
+    """Fix round 2 (#2): a close that will 404 never waits on git."""
+
+    @pytest.mark.parametrize("path", ["/api/issue/{id}/close", "/api/weft/issues/{id}/close"])
+    async def test_missing_issue_404_without_reachability_check(
+        self, client: AsyncClient, dashboard_db: PopulatedDB, monkeypatch: pytest.MonkeyPatch, path: str
+    ) -> None:
+        def _boom(*_a: object, **_k: object) -> None:
+            raise AssertionError("reachability check must not run for a missing issue")
+
+        monkeypatch.setattr(commit_reachability, "check_commit_reachable", _boom)
+        missing = f"{dashboard_db.db.prefix}-deadbeef00"
+        resp = await client.post(path.format(id=missing), json={"actor": "x", "commit": "main@abc1234"})
+        assert resp.status_code == 404, resp.text

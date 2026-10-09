@@ -1282,10 +1282,13 @@ async def _handle_close_issue(arguments: dict[str, Any]) -> list[TextContent]:
         return _text(ErrorResponse(error="commit must be a string", code=ErrorCode.VALIDATION))
     tracker = get_db()
     # Task 0.6: the commit reachability check runs git (fetch + merge-base, up
-    # to ~10 s each), so it runs off the event loop -- and before any DB read,
-    # so nothing below awaits between reading and writing. It touches no DB
-    # connection.
-    commit_check = await asyncio.to_thread(tracker.check_close_commit, commit) if commit is not None else None
+    # to ~10 s each), so it runs off the event loop -- and before the close's
+    # DB work, so nothing below awaits between reading and writing. It touches
+    # no DB connection.
+    # Skipped when the close will 404 or refuse as already closed.
+    commit_check = None
+    if commit is not None and tracker.close_commit_check_applies(args["issue_id"]):
+        commit_check = await asyncio.to_thread(tracker.check_close_commit, commit)
     try:
         gate = governance.evaluate_closure_gate(tracker, args["issue_id"])
         if not gate.allowed:

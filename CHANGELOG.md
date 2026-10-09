@@ -96,6 +96,9 @@ policy (ADR-030) records this as its one pre-4.0 exception.
   origin <integration_ref>` in the project root (10 s timeout; per process,
   a successful fetch is reused for 60 s and a failed one for 30 s), then
   `git merge-base --is-ancestor <sha> origin/<integration_ref>` (10 s timeout).
+  A "not reachable" result that relied on a cached fetch is checked again after
+  one fresh fetch, so a commit pushed moments ago is not blamed. A close that
+  will 404 or is already closed skips git.
   On the MCP and HTTP surfaces this runs on a worker thread, never on the
   event loop. A sha that is not an ancestor adds
   `commit_not_reachable_from_integration_ref: <sha> not in origin/<ref>` to the

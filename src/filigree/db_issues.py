@@ -1343,6 +1343,21 @@ class IssuesMixin(DBMixinProtocol):
             closed.close_warnings.append(check.warning)
         return closed
 
+    def close_commit_check_applies(self, issue_id: str) -> bool:
+        """Whether a close of *issue_id* would reach the commit check at all.
+
+        False when ``close_issue`` is going to refuse before checking: a
+        foreign prefix, a missing issue, or one already in a done state. Async
+        handlers call this (a cheap read, no transaction) before awaiting the
+        git check so a 404 / already-closed answer never waits on git.
+        """
+        try:
+            self._check_id_prefix(issue_id)
+            issue = self.get_issue(issue_id)
+        except (KeyError, ValueError):
+            return False
+        return self._resolve_status_category(issue.type, issue.status) != "done"
+
     def check_close_commit(self, commit: str) -> ReachabilityCheck:
         """Reachability verdict for a close anchor (Task 0.6). Blocking; never raises.
 

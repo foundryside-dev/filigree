@@ -280,8 +280,9 @@ def test_shallow_clone_head_still_reachable(tmp_path: Path) -> None:
 class _FakeGit:
     """Scripted stand-in for ``subprocess.run`` keyed on the git subcommand."""
 
-    def __init__(self, results: dict[str, tuple[int, str]]) -> None:
-        self.results = results
+    def __init__(self, results: dict[str, tuple[int, str] | list[tuple[int, str]]]) -> None:
+        # A list scripts successive calls (the last entry repeats).
+        self.results = {k: list(v) if isinstance(v, list) else [v] for k, v in results.items()}
         self.calls: list[list[str]] = []
         self.envs: list[dict[str, str]] = []
 
@@ -291,7 +292,8 @@ class _FakeGit:
         assert isinstance(env, dict)
         self.envs.append(env)
         sub = argv[1] if argv[1] != "rev-parse" else argv[2].split("=")[0]
-        code, out = self.results[sub]
+        script = self.results[sub]
+        code, out = script.pop(0) if len(script) > 1 else script[0]
         return subprocess.CompletedProcess(argv, code, stdout=out, stderr="")
 
     def count(self, sub: str) -> int:
@@ -337,6 +339,101 @@ def test_failed_fetch_is_negatively_cached(tmp_path: Path, monkeypatch: pytest.M
     clock[0] += commit_reachability.FETCH_FAILURE_TTL_S + 1
     commit_reachability.check_commit_reachable(repo, "main@abc1234", "main")
     assert fake.count("fetch") == 2
+
+
+def _seed_fetch_success(repo: Path) -> None:
+    """Pretend a fetch of origin/main succeeded a moment ago (a cache hit)."""
+    commit_reachability._fetch_cache[(str(repo.resolve()), "main")] = (time.monotonic(), True)
+
+
+def test_cached_fetch_exit128_refetches_before_blaming(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Fix round 2 (#1): X was pushed from another clone moments ago; the cached
+    # fetch predates it. Exit 128 must trigger one fresh fetch, after which X is
+    # present and an ancestor -> True, never a persisted false "not reachable".
+    fake = _FakeGit(
+        {
+            "fetch": (0, ""),
+            "merge-base": [(128, ""), (0, "")],
+            "--is-shallow-repository": (0, "false\n"),
+            "--disambiguate": (0, ""),
+        }
+    )
+    monkeypatch.setattr(commit_reachability.subprocess, "run", fake)
+    repo = _fake_repo(tmp_path)
+    _seed_fetch_success(repo)
+
+    assert commit_reachability.check_commit_reachable(repo, "main@abc1234", "main").reachable is True
+    assert fake.count("fetch") == 1
+
+
+def test_cached_fetch_exit1_refetches_before_blaming(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeGit({"fetch": (0, ""), "merge-base": [(1, ""), (0, "")], "--is-shallow-repository": (0, "false\n")})
+    monkeypatch.setattr(commit_reachability.subprocess, "run", fake)
+    repo = _fake_repo(tmp_path)
+    _seed_fetch_success(repo)
+
+    assert commit_reachability.check_commit_reachable(repo, "main@abc1234", "main").reachable is True
+    assert fake.count("fetch") == 1
+
+
+def test_cached_fetch_still_unreachable_after_refetch_is_false(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeGit({"fetch": (0, ""), "merge-base": (1, ""), "--is-shallow-repository": (0, "false\n")})
+    monkeypatch.setattr(commit_reachability.subprocess, "run", fake)
+    repo = _fake_repo(tmp_path)
+    _seed_fetch_success(repo)
+
+    assert commit_reachability.check_commit_reachable(repo, "main@abc1234", "main").reachable is False
+    assert fake.count("fetch") == 1  # exactly one fresh fetch, no loop
+
+
+def test_cached_fetch_refetch_failure_is_unknown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeGit(
+        {
+            "fetch": (128, ""),
+            "merge-base": (128, ""),
+            "--is-shallow-repository": (0, "false\n"),
+            "--disambiguate": (0, ""),
+        }
+    )
+    monkeypatch.setattr(commit_reachability.subprocess, "run", fake)
+    repo = _fake_repo(tmp_path)
+    _seed_fetch_success(repo)
+
+    result = commit_reachability.check_commit_reachable(repo, "main@abc1234", "main")
+    assert result.reachable == "unknown"
+    assert result.warning is None
+
+
+def test_fresh_fetch_exit1_does_not_refetch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeGit({"fetch": (0, ""), "merge-base": (1, ""), "--is-shallow-repository": (0, "false\n")})
+    monkeypatch.setattr(commit_reachability.subprocess, "run", fake)
+
+    assert commit_reachability.check_commit_reachable(_fake_repo(tmp_path), "main@abc1234", "main").reachable is False
+    assert fake.count("fetch") == 1
+
+
+@pytest.mark.asyncio
+async def test_mcp_close_with_commit_on_missing_issue_skips_git(mcp_db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Fix round 2 (#2): a close that will 404 never waits on git.
+    def _boom(*_a: object, **_k: object) -> None:
+        raise AssertionError("reachability check must not run for a missing issue")
+
+    monkeypatch.setattr(commit_reachability, "check_commit_reachable", _boom)
+    data = _parse(await _handle_close_issue({"issue_id": "mcp-deadbeef00", "commit": "main@abc1234"}))
+    assert data["code"] == "NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_mcp_close_with_commit_on_closed_issue_skips_git(mcp_db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+    issue = mcp_db.create_issue("already closed", priority=2)
+    mcp_db.close_issue(issue.id)
+
+    def _boom(*_a: object, **_k: object) -> None:
+        raise AssertionError("reachability check must not run for an already-closed issue")
+
+    monkeypatch.setattr(commit_reachability, "check_commit_reachable", _boom)
+    data = _parse(await _handle_close_issue({"issue_id": issue.id, "commit": "main@abc1234"}))
+    assert "error" in data
 
 
 def test_git_env_is_hardened(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

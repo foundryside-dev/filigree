@@ -9,7 +9,9 @@ The check is advisory and never blocks a close in 3.x.
 Three-valued result (``close_commit_reachable``):
 
 - ``True``  -- ``git merge-base --is-ancestor`` exited 0.
-- ``False`` -- in a full (non-shallow) clone, after a successful fetch:
+- ``False`` -- in a full (non-shallow) clone, after a successful fetch (a
+  fresh one: when the fetch came from the 60 s cache, a False verdict forces
+  one more fetch and re-check first, so a push made moments ago is seen):
   merge-base exited 1 (the sha exists locally but is not an ancestor), or it
   exited 128 and git has no object with that prefix at all (a commit that only
   exists in another clone cannot be an ancestor of the freshly fetched ref). A
@@ -152,21 +154,26 @@ def _run_git(root: Path, args: list[str], timeout: float) -> tuple[int, str] | N
     return proc.returncode, proc.stdout or ""
 
 
-def _fetch(root: Path, ref: str) -> bool:
-    """Fetch ``origin <ref>``; successes are cached for 60 s, failures for 30 s."""
+def _fetch(root: Path, ref: str, *, force: bool = False) -> tuple[bool, bool]:
+    """Fetch ``origin <ref>``; return ``(ok, fresh)``.
+
+    A success is reused for 60 s and a failure for 30 s; ``fresh`` is False when
+    the answer came from that cache. ``force`` bypasses a cached *success* (the
+    caller needs a ref no older than now) but still honours a cached failure.
+    """
     key = (str(root.resolve()), ref)
     with _fetch_lock:
         cached = _fetch_cache.get(key)
         if cached is not None:
             at, ok = cached
             ttl = FETCH_CACHE_TTL_S if ok else FETCH_FAILURE_TTL_S
-            if time.monotonic() - at < ttl:
-                return ok
+            if time.monotonic() - at < ttl and not (force and ok):
+                return ok, False
     result = _run_git(root, ["fetch", "--quiet", "origin", ref], FETCH_TIMEOUT_S)
     ok = result is not None and result[0] == 0
     with _fetch_lock:
         _fetch_cache[key] = (time.monotonic(), ok)
-    return ok
+    return ok, True
 
 
 def _is_shallow(root: Path) -> bool | None:
@@ -202,23 +209,36 @@ def check_commit_reachable(project_root: Path | None, anchor: str, integration_r
     # or file for a worktree) is asked. Keeps tmp-dir stores off git entirely.
     if not (project_root / ".git").exists():
         return unknown()
-    if not _fetch(project_root, integration_ref):
+    ok, fresh = _fetch(project_root, integration_ref)
+    if not ok:
         return unknown()
-    result = _run_git(project_root, ["merge-base", "--is-ancestor", sha, remote_ref], MERGE_BASE_TIMEOUT_S)
+    verdict = _ancestry_verdict(project_root, sha, remote_ref)
+    if verdict is False and not fresh:
+        # The False verdicts assume origin/<ref> is current. A cached fetch may
+        # predate a push made moments ago (from another clone), so fetch once
+        # more before blaming the commit; if that fetch fails, git cannot answer.
+        ok, _ = _fetch(project_root, integration_ref, force=True)
+        if not ok:
+            return unknown()
+        verdict = _ancestry_verdict(project_root, sha, remote_ref)
+    return ReachabilityCheck(reachable=verdict, sha=sha, ref=remote_ref)
+
+
+def _ancestry_verdict(root: Path, sha: str, remote_ref: str) -> Reachable:
+    """Ask git whether *sha* is an ancestor of *remote_ref* (fetched already)."""
+    result = _run_git(root, ["merge-base", "--is-ancestor", sha, remote_ref], MERGE_BASE_TIMEOUT_S)
     code = result[0] if result is not None else None
     if code == 0:
-        return ReachabilityCheck(reachable=True, sha=sha, ref=remote_ref)
+        return True
     if code not in (1, 128):
-        return unknown()
+        return "unknown"
     # A shallow history can hide ancestry (exit 1 at the boundary) and lacks
     # objects that exist upstream, so neither exit code is an answer there.
-    if _is_shallow(project_root) is not False:
-        return unknown()
+    if _is_shallow(root) is not False:
+        return "unknown"
     if code == 1:
-        return ReachabilityCheck(reachable=False, sha=sha, ref=remote_ref)
-    # Exit 128 after a successful fetch into a full clone: every commit reachable
-    # from origin/<ref> is local, so a sha with no local object cannot be one of
+        return False
+    # Exit 128 after a fetch into a full clone: every commit reachable from
+    # origin/<ref> is local, so a sha with no local object cannot be one of
     # them. An ambiguous prefix or a non-commit object stays unknown.
-    if _object_missing(project_root, sha):
-        return ReachabilityCheck(reachable=False, sha=sha, ref=remote_ref)
-    return unknown()
+    return False if _object_missing(root, sha) else "unknown"
