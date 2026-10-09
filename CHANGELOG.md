@@ -93,20 +93,27 @@ policy (ADR-030) records this as its one pre-4.0 exception.
 - **Close responses carry `warnings[]`; commit-anchor reachability check
   (`close_commit_reachable`).** When a close cites a commit anchor
   (`--commit` / `commit`, `branch@sha`), Filigree runs `git fetch --quiet
-  origin <integration_ref>` (10 s timeout, cached per process for 60 s) and
-  `git merge-base --is-ancestor <sha> origin/<integration_ref>` (10 s timeout)
-  in the project root. A sha that is not an ancestor adds
+  origin <integration_ref>` in the project root (10 s timeout; per process,
+  a successful fetch is reused for 60 s and a failed one for 30 s), then
+  `git merge-base --is-ancestor <sha> origin/<integration_ref>` (10 s timeout).
+  On the MCP and HTTP surfaces this runs on a worker thread, never on the
+  event loop. A sha that is not an ancestor adds
   `commit_not_reachable_from_integration_ref: <sha> not in origin/<ref>` to the
-  response's `warnings[]`; a squash-merged branch sha reports this too. The
-  close still goes through: the check never blocks in 3.x. The verdict
-  (`true` / `false` / `"unknown"`) is stored as a new non-reversible
-  `close_commit_checked` event and shown as `close_commit_reachable` on MCP
-  `issue_get` (`null` when the issue has no close anchor). The verdict is
-  `unknown`, with no warning, when there is no git checkout at the project
-  root, git is missing, the anchor has no 7–40 hex sha, the fetch fails or
-  times out, or git does not know the sha. New config key `integration_ref`
-  (default `main`), settable with `filigree config set integration_ref <branch>`. The sha and ref are validated before they are passed to
-  git as argv, with no shell. `warnings[]` appears on MCP `issue_close`, HTTP
+  response's `warnings[]`. That includes a squash-merged branch sha, and, in a
+  full clone, a sha git has no object for (for example, a commit that exists
+  only in another clone). The close still goes through: the check never blocks
+  in 3.x. The verdict (`true` / `false` / `"unknown"`) is stored as a new
+  non-reversible `close_commit_checked` event and shown as
+  `close_commit_reachable` on MCP `issue_get` (`null` when the issue has no
+  close anchor). The verdict is `unknown`, with no warning, when there is no git
+  checkout at the project root, git is missing, the anchor has no 7–40 hex sha,
+  the fetch fails or times out, the clone is shallow, or the sha prefix is
+  ambiguous. New config key `integration_ref` (default `main`), settable with
+  `filigree config set integration_ref <branch>`. The sha and ref are validated
+  before they are passed to git as argv, with no shell. Inherited `GIT_DIR`,
+  `GIT_WORK_TREE` and `GIT_INDEX_FILE` are stripped, and ssh runs in batch mode
+  unless `GIT_SSH_COMMAND` is set, so a prompt cannot hang the fetch.
+  `warnings[]` appears on MCP `issue_close`, HTTP
   `POST /api/issue/{id}/close` and `POST /api/weft/issues/{id}/close`, and on
   each `succeeded` item of CLI `close --json` (the CLI prints `Warning: ...` to
   stderr otherwise). It is omitted when empty. It also carries the closure

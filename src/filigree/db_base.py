@@ -413,6 +413,7 @@ class DBMixinProtocol(Protocol):
         expected_assignee: str | None = None,
         force: bool = False,
         commit: str | None = None,
+        _close_commit_check: ReachabilityCheck | None = None,
         _skip_begin: bool = False,
     ) -> Issue: ...
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sqlite3
 from collections.abc import Callable
@@ -453,9 +454,11 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                     "commit": {
                         "type": "string",
                         "description": (
-                            "Opaque branch@sha commit anchor (warpline seam). Stored verbatim as "
-                            "close_commit so warpline can correlate 'changed since closed' on the "
-                            "commit, not the clock. Omit to leave it null."
+                            "branch@sha commit anchor, stored verbatim as close_commit. Filigree "
+                            "checks the sha against origin/<integration_ref> (default main); if it is "
+                            "not reachable the close still succeeds and the response carries a "
+                            "'commit_not_reachable_from_integration_ref' entry in warnings[]. Omit to "
+                            "leave it null."
                         ),
                     },
                 },
@@ -1278,6 +1281,11 @@ async def _handle_close_issue(arguments: dict[str, Any]) -> list[TextContent]:
     if commit is not None and not isinstance(commit, str):
         return _text(ErrorResponse(error="commit must be a string", code=ErrorCode.VALIDATION))
     tracker = get_db()
+    # Task 0.6: the commit reachability check runs git (fetch + merge-base, up
+    # to ~10 s each), so it runs off the event loop -- and before any DB read,
+    # so nothing below awaits between reading and writing. It touches no DB
+    # connection.
+    commit_check = await asyncio.to_thread(tracker.check_close_commit, commit) if commit is not None else None
     try:
         gate = governance.evaluate_closure_gate(tracker, args["issue_id"])
         if not gate.allowed:
@@ -1293,6 +1301,7 @@ async def _handle_close_issue(arguments: dict[str, Any]) -> list[TextContent]:
             expected_assignee=expected_assignee,
             force=force,
             commit=commit,
+            _close_commit_check=commit_check,
         )
         refresh_summary()
         ready_after = tracker.get_ready()

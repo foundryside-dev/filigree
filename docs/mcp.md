@@ -184,11 +184,12 @@ the observed holder; mismatches return `CONFLICT` and name both holders.
 When `commit` is given, Filigree checks whether its sha is an ancestor of
 `origin/<integration_ref>` (config key `integration_ref`, default `main`),
 after a bounded `git fetch` in the project root. If it is not (for example, a
-branch that never merged, or a squash-merged branch sha), the issue still
-closes and the response carries
+branch that never merged, a squash-merged branch sha, or, in a full clone, a
+sha git has no object for), the issue still closes and the response carries
 `warnings: ["commit_not_reachable_from_integration_ref: <sha> not in origin/<ref>"]`.
-If git cannot answer (no checkout, git missing, fetch failed, sha unknown to
-git), the verdict is `unknown` and no warning is added. The verdict is stored
+If git cannot answer (no checkout, git missing, fetch failed, shallow clone,
+ambiguous sha prefix), the verdict is `unknown` and no warning is added. The
+check runs off the event loop. The verdict is stored
 on a `close_commit_checked` event and shown as `close_commit_reachable` on
 `issue_get`.
 `warnings` is omitted when empty.

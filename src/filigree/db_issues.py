@@ -873,8 +873,10 @@ class IssuesMixin(DBMixinProtocol):
             claim_commit: Opaque ``branch@sha`` commit anchor (warpline seam,
                 contract B), stored verbatim wherever ``claimed_at`` is set; NULL
                 otherwise. Filigree never parses it.
-            close_commit: Opaque ``branch@sha`` commit anchor stored verbatim
-                wherever ``closed_at`` is set (done-entry); NULL otherwise.
+            close_commit: ``branch@sha`` commit anchor stored verbatim
+                wherever ``closed_at`` is set (done-entry); NULL otherwise. The
+                stored value is never rewritten; ``close_issue`` reads the sha
+                out of it only for its advisory reachability check.
             _close_commit_check: Private (``close_issue`` only). The
                 reachability verdict for ``close_commit``, computed by the
                 caller *outside* the write lock; recorded as a
@@ -1240,6 +1242,7 @@ class IssuesMixin(DBMixinProtocol):
         expected_assignee: str | None = None,
         force: bool = False,
         commit: str | None = None,
+        _close_commit_check: ReachabilityCheck | None = None,
         _skip_begin: bool = False,
     ) -> Issue:
         """Close an issue.
@@ -1272,6 +1275,12 @@ class IssuesMixin(DBMixinProtocol):
         ``close_commit_checked`` event; a definite "not reachable" adds a
         ``commit_not_reachable_from_integration_ref`` entry to the returned
         issue's transient ``close_warnings``. The check never blocks the close.
+
+        The check runs git (up to ~10 s each for fetch and merge-base), so an
+        ``async`` caller must compute it off the event loop with
+        ``await asyncio.to_thread(db.check_close_commit, commit)`` and pass the
+        result as ``_close_commit_check``; ``close_issue`` then does not run git.
+        Synchronous callers (CLI) leave it ``None`` and the check runs inline.
         """
         if fields is not None and not isinstance(fields, dict):
             msg = "fields must be a dict"
@@ -1312,11 +1321,11 @@ class IssuesMixin(DBMixinProtocol):
         if reason:
             update_fields["close_reason"] = reason
 
-        check: ReachabilityCheck | None = None
-        if commit is not None:
-            from filigree.core import read_integration_ref
-
-            check = commit_reachability.check_commit_reachable(self.project_root, commit, read_integration_ref(self.meta_dir))
+        check = _close_commit_check
+        if commit is not None and check is None:
+            check = self.check_close_commit(commit)
+        elif commit is None:
+            check = None
 
         mode = TransitionMode.BACKWARD if force else TransitionMode.FORWARD
         closed = self.update_issue(
@@ -1333,6 +1342,17 @@ class IssuesMixin(DBMixinProtocol):
         if check is not None and check.warning is not None:
             closed.close_warnings.append(check.warning)
         return closed
+
+    def check_close_commit(self, commit: str) -> ReachabilityCheck:
+        """Reachability verdict for a close anchor (Task 0.6). Blocking; never raises.
+
+        Touches no database connection (only ``config.json`` and git), so async
+        handlers may run it via ``asyncio.to_thread`` without borrowing a
+        worker-thread connection.
+        """
+        from filigree.core import read_integration_ref
+
+        return commit_reachability.check_commit_reachable(self.project_root, commit, read_integration_ref(self.meta_dir))
 
     @_retry_busy()
     @_in_immediate_tx("reopen_issue")

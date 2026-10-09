@@ -13,6 +13,7 @@ paths at the ``sqlite3.Connection`` level.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING, Any, overload
 
@@ -23,6 +24,7 @@ if TYPE_CHECKING:
     from fastapi.responses import JSONResponse
 
 from filigree import governance
+from filigree.commit_reachability import ReachabilityCheck
 from filigree.core import FiligreeDB, WrongProjectError
 from filigree.dashboard_routes.common import (
     _MAX_PAGINATION_OFFSET,
@@ -74,6 +76,20 @@ def _issue_write_error_details(exc: BaseException) -> dict[str, Any] | None:
     if isinstance(exc, ClaimConflictError):
         return claim_conflict_details(exc)
     return _invalid_transition_details(exc)
+
+
+async def _check_close_commit_off_loop(db: FiligreeDB, commit: str | None) -> ReachabilityCheck | None:
+    """Run the close-anchor reachability check (Task 0.6) on a worker thread.
+
+    The check shells out to git (fetch + merge-base, up to ~10 s each), so it
+    must not run on the event loop. It reads only ``config.json`` and runs git;
+    it touches no ``sqlite3.Connection``, so the CONNECTION INVARIANT above is
+    unaffected. Callers await it before their first DB read, so the handler's
+    DB work still runs to completion without an ``await`` in the middle.
+    """
+    if commit is None:
+        return None
+    return await asyncio.to_thread(db.check_close_commit, commit)
 
 
 def _closure_gate_block(decision: governance.GateDecision) -> JSONResponse:
@@ -628,6 +644,9 @@ def create_classic_router() -> APIRouter:
         if commit is not None and not isinstance(commit, str):
             return _error_response("commit must be a string", ErrorCode.VALIDATION, 400)
         fields = body.get("fields")
+        # Task 0.6: git reachability check off the event loop, before any DB
+        # read (see _check_close_commit_off_loop).
+        commit_check = await _check_close_commit_off_loop(db, commit)
         try:
             gate = governance.evaluate_closure_gate(db, issue_id)
             if not gate.allowed:
@@ -641,6 +660,7 @@ def create_classic_router() -> APIRouter:
                 fields=fields,
                 expected_assignee=expected_assignee,
                 commit=commit,
+                _close_commit_check=commit_check,
             )
         except KeyError:
             return _error_response(f"Issue not found: {issue_id}", ErrorCode.NOT_FOUND, 404)
@@ -1486,6 +1506,9 @@ def create_weft_router() -> APIRouter:
         if commit is not None and not isinstance(commit, str):
             return _error_response("commit must be a string", ErrorCode.VALIDATION, 400)
         fields = body.get("fields")
+        # Task 0.6: git reachability check off the event loop, before any DB
+        # read (see _check_close_commit_off_loop).
+        commit_check = await _check_close_commit_off_loop(db, commit)
         ready_before = {i.id for i in db.get_ready()}
         try:
             gate = governance.evaluate_closure_gate(db, issue_id)
@@ -1500,6 +1523,7 @@ def create_weft_router() -> APIRouter:
                 fields=fields,
                 expected_assignee=expected_assignee,
                 commit=commit,
+                _close_commit_check=commit_check,
             )
         except KeyError:
             return _error_response(f"Issue not found: {issue_id}", ErrorCode.NOT_FOUND, 404)

@@ -7,8 +7,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -198,18 +200,198 @@ async def test_close_when_fetch_fails_reports_unknown(mcp_db: FiligreeDB, tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_close_with_sha_unknown_to_git_reports_unknown(mcp_db: FiligreeDB, tmp_path: Path) -> None:
-    # merge-base exits 128 for an object git does not have: git could not
-    # answer, so the result is unknown, not "unreachable".
+async def test_close_with_sha_missing_after_fetch_reports_unreachable(mcp_db: FiligreeDB, tmp_path: Path) -> None:
+    # Fix round 1 (#2): after a successful fetch in a full (non-shallow) clone,
+    # every commit reachable from origin/main is present locally. A sha git does
+    # not have therefore cannot be an ancestor: merge-base's exit 128 is a
+    # definite "not reachable", never a silent pass.
     _init_repo_with_origin(tmp_path)
     issue = mcp_db.create_issue("close on a foreign sha", priority=2)
 
     data = _parse(await _handle_close_issue({"issue_id": issue.id, "reason": "done", "commit": "main@0123456789abcdef"}))
 
     assert "error" not in data, data
-    assert "warnings" not in data
+    assert data["warnings"] == ["commit_not_reachable_from_integration_ref: 0123456789abcdef not in origin/main"]
     got = _parse(await _handle_get_issue({"issue_id": issue.id}))
-    assert got["close_commit_reachable"] == "unknown"
+    assert got["close_commit_reachable"] is False
+
+
+@pytest.mark.asyncio
+async def test_close_with_unpushed_sha_from_another_clone_reports_unreachable(mcp_db: FiligreeDB, tmp_path: Path) -> None:
+    # The motivating false-"shipped" case: the commit exists only in another
+    # clone that never pushed it.
+    _init_repo_with_origin(tmp_path)
+    other = tmp_path / "other-clone"
+    _git(tmp_path, "clone", "-q", str(tmp_path / "origin.git"), str(other))
+    foreign_sha = _commit_file(other, "x.txt", "x\n", "never pushed from the other clone")
+    issue = mcp_db.create_issue("close on another clone's unpushed sha", priority=2)
+
+    data = _parse(await _handle_close_issue({"issue_id": issue.id, "reason": "done", "commit": f"feat@{foreign_sha}"}))
+
+    assert "error" not in data, data
+    assert data["warnings"] == [f"commit_not_reachable_from_integration_ref: {foreign_sha} not in origin/main"]
+
+
+def _shallow_project(tmp_path: Path) -> tuple[Path, str, str]:
+    """A shallow checkout of a 2-commit origin holding both commits as depth-1 roots.
+
+    Returns (project, old_sha, head_sha); ``old_sha`` IS an ancestor of
+    origin/main upstream, but the shallow history cannot show it.
+    """
+    upstream = tmp_path / "upstream"
+    upstream.mkdir()
+    old_sha = _init_repo_with_origin(upstream)
+    _git(upstream, "tag", "old", old_sha)
+    head_sha = _commit_file(upstream, "b.txt", "b\n", "second")
+    _git(upstream, "push", "-q", "origin", "main", "old")
+    project = tmp_path / "project"
+    project.mkdir()
+    _git(project, "init", "-q", "-b", "main")
+    _git(project, "remote", "add", "origin", f"file://{upstream / 'origin.git'}")
+    _git(project, "fetch", "-q", "--depth", "1", "origin", "main")
+    _git(project, "fetch", "-q", "--depth", "1", "origin", "refs/tags/old:refs/tags/old")
+    assert _git(project, "rev-parse", "--is-shallow-repository") == "true"
+    return project, old_sha, head_sha
+
+
+def test_shallow_clone_exit1_at_boundary_reports_unknown(tmp_path: Path) -> None:
+    # Fix round 1 (#3): both commits are shallow roots, so merge-base exits 1
+    # although old_sha is reachable upstream. git cannot answer -> unknown.
+    project, old_sha, _ = _shallow_project(tmp_path)
+    assert subprocess.run(["git", "merge-base", "--is-ancestor", old_sha, "origin/main"], cwd=project, check=False).returncode == 1
+
+    result = commit_reachability.check_commit_reachable(project, f"main@{old_sha}", "main")
+
+    assert result.reachable == "unknown"
+    assert result.warning is None
+
+
+def test_shallow_clone_missing_object_reports_unknown(tmp_path: Path) -> None:
+    project, _, _ = _shallow_project(tmp_path)
+    result = commit_reachability.check_commit_reachable(project, "main@0123456789abcdef", "main")
+    assert result.reachable == "unknown"
+
+
+def test_shallow_clone_head_still_reachable(tmp_path: Path) -> None:
+    project, _, head_sha = _shallow_project(tmp_path)
+    assert commit_reachability.check_commit_reachable(project, f"main@{head_sha}", "main").reachable is True
+
+
+class _FakeGit:
+    """Scripted stand-in for ``subprocess.run`` keyed on the git subcommand."""
+
+    def __init__(self, results: dict[str, tuple[int, str]]) -> None:
+        self.results = results
+        self.calls: list[list[str]] = []
+        self.envs: list[dict[str, str]] = []
+
+    def __call__(self, argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        self.calls.append(argv)
+        env = kwargs.get("env")
+        assert isinstance(env, dict)
+        self.envs.append(env)
+        sub = argv[1] if argv[1] != "rev-parse" else argv[2].split("=")[0]
+        code, out = self.results[sub]
+        return subprocess.CompletedProcess(argv, code, stdout=out, stderr="")
+
+    def count(self, sub: str) -> int:
+        return sum(1 for a in self.calls if a[1] == sub)
+
+
+def _fake_repo(tmp_path: Path) -> Path:
+    (tmp_path / ".git").mkdir()
+    return tmp_path
+
+
+def test_ambiguous_short_sha_reports_unknown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeGit(
+        {
+            "fetch": (0, ""),
+            "merge-base": (128, ""),
+            "--is-shallow-repository": (0, "false\n"),
+            "--disambiguate": (0, "abc1234aaaa\nabc1234bbbb\n"),
+        }
+    )
+    monkeypatch.setattr(commit_reachability.subprocess, "run", fake)
+    assert commit_reachability.check_commit_reachable(_fake_repo(tmp_path), "main@abc1234", "main").reachable == "unknown"
+
+
+def test_unknown_shallowness_never_blames(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeGit({"fetch": (0, ""), "merge-base": (1, ""), "--is-shallow-repository": (128, "")})
+    monkeypatch.setattr(commit_reachability.subprocess, "run", fake)
+    assert commit_reachability.check_commit_reachable(_fake_repo(tmp_path), "main@abc1234", "main").reachable == "unknown"
+
+
+def test_failed_fetch_is_negatively_cached(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Fix round 1 (#1): a dead origin costs one fetch timeout per window, not per close.
+    fake = _FakeGit({"fetch": (128, "")})
+    monkeypatch.setattr(commit_reachability.subprocess, "run", fake)
+    clock = [1000.0]
+    monkeypatch.setattr(commit_reachability.time, "monotonic", lambda: clock[0])
+    repo = _fake_repo(tmp_path)
+
+    for _ in range(3):
+        assert commit_reachability.check_commit_reachable(repo, "main@abc1234", "main").reachable == "unknown"
+    assert fake.count("fetch") == 1
+
+    clock[0] += commit_reachability.FETCH_FAILURE_TTL_S + 1
+    commit_reachability.check_commit_reachable(repo, "main@abc1234", "main")
+    assert fake.count("fetch") == 2
+
+
+def test_git_env_is_hardened(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Fix round 1 (#4): inherited GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE never
+    # redirect the check; ssh can never prompt.
+    for var in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
+        monkeypatch.setenv(var, str(tmp_path / "elsewhere"))
+    monkeypatch.delenv("GIT_SSH_COMMAND", raising=False)
+    fake = _FakeGit({"fetch": (0, ""), "merge-base": (0, "")})
+    monkeypatch.setattr(commit_reachability.subprocess, "run", fake)
+
+    commit_reachability.check_commit_reachable(_fake_repo(tmp_path), "main@abc1234", "main")
+
+    for env in fake.envs:
+        assert not {"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"} & env.keys()
+        assert env["GIT_TERMINAL_PROMPT"] == "0"
+        assert env["GIT_SSH_COMMAND"] == "ssh -o BatchMode=yes"
+
+
+def test_user_git_ssh_command_is_kept(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GIT_SSH_COMMAND", "ssh -i /k")
+    fake = _FakeGit({"fetch": (0, ""), "merge-base": (0, "")})
+    monkeypatch.setattr(commit_reachability.subprocess, "run", fake)
+    commit_reachability.check_commit_reachable(_fake_repo(tmp_path), "main@abc1234", "main")
+    assert all(env["GIT_SSH_COMMAND"] == "ssh -i /k" for env in fake.envs)
+
+
+def test_inherited_git_dir_does_not_redirect_real_check(mcp_db: FiligreeDB, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    base_sha = _init_repo_with_origin(tmp_path)
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "not-a-repo"))
+    assert commit_reachability.check_commit_reachable(tmp_path, f"main@{base_sha}", "main").reachable is True
+
+
+@pytest.mark.asyncio
+async def test_mcp_close_runs_reachability_off_the_event_loop(mcp_db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Fix round 1 (#1): a slow git must not stall the event loop.
+    def _slow(*_a: object, **_k: object) -> commit_reachability.ReachabilityCheck:
+        time.sleep(0.5)
+        return commit_reachability.ReachabilityCheck(reachable=True, sha="abc1234", ref="origin/main")
+
+    monkeypatch.setattr(commit_reachability, "check_commit_reachable", _slow)
+    issue = mcp_db.create_issue("slow check", priority=2)
+    order: list[str] = []
+
+    async def _close() -> None:
+        await _handle_close_issue({"issue_id": issue.id, "reason": "done", "commit": "main@abc1234"})
+        order.append("close")
+
+    async def _tick() -> None:
+        await asyncio.sleep(0.05)
+        order.append("tick")
+
+    await asyncio.gather(_close(), _tick())
+    assert order == ["tick", "close"]
+    assert mcp_db.get_issue(issue.id).status_category == "done"
 
 
 @pytest.mark.asyncio

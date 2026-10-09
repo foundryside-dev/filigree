@@ -11,6 +11,9 @@ attaching an entity-association with a non-null signature (the B1 column).
 
 from __future__ import annotations
 
+import asyncio
+import time
+
 import pytest
 from httpx import AsyncClient
 
@@ -319,3 +322,33 @@ class TestCloseWarningsCombined:
         resp = await client.post(f"/api/weft/issues/{issue_id}/close", json={"actor": "x", "commit": "side@abc1234"})
         assert resp.status_code == 200, resp.text
         assert resp.json()["warnings"] == [ARCHIVED_WARNING, unreachable]
+
+
+class TestCloseReachabilityOffLoop:
+    """Fix round 1 (#1): the git check never blocks the daemon's event loop."""
+
+    @pytest.mark.parametrize("path", ["/api/issue/{id}/close", "/api/weft/issues/{id}/close"])
+    async def test_health_answers_while_close_waits_on_git(
+        self, client: AsyncClient, dashboard_db: PopulatedDB, monkeypatch: pytest.MonkeyPatch, path: str
+    ) -> None:
+        def _slow(*_a: object, **_k: object) -> commit_reachability.ReachabilityCheck:
+            time.sleep(0.5)
+            return commit_reachability.ReachabilityCheck(reachable=True, sha="abc1234", ref="origin/main")
+
+        monkeypatch.setattr(commit_reachability, "check_commit_reachable", _slow)
+        issue_id = dashboard_db.ids["a"]
+        order: list[str] = []
+
+        async def _close() -> None:
+            resp = await client.post(path.format(id=issue_id), json={"actor": "x", "commit": "main@abc1234"})
+            assert resp.status_code == 200, resp.text
+            order.append("close")
+
+        async def _health() -> None:
+            await asyncio.sleep(0.05)
+            resp = await client.get("/api/health")
+            assert resp.status_code == 200, resp.text
+            order.append("health")
+
+        await asyncio.gather(_close(), _health())
+        assert order == ["health", "close"]
