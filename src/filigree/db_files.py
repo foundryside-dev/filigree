@@ -176,6 +176,25 @@ def _wardline_non_defect_kind_sql(alias: str = "") -> str:
     return f"(json_valid({col}) AND json_extract({col}, '$.wardline.kind') IN ({kinds}))"
 
 
+def _wardline_defect_side_sql(alias: str = "") -> str:
+    """SQL predicate that is true when a stored finding is on the DEFECT side.
+
+    The negation of ``_wardline_non_defect_kind_sql`` for use as a guard on
+    absence-driven transitions (the ``mark_unseen`` sweep and the clean-stale
+    ``unseen_in_latest`` -> ``fixed`` ageing): Stage 0 never moves a stored
+    telemetry row on absence. Written as a ``CASE`` because SQLite only
+    guarantees lazy evaluation there -- wrapping the ``json_valid(...) AND
+    json_extract(...)`` form in a function (e.g. ``COALESCE``) evaluates
+    ``json_extract`` on corrupt text and raises ``malformed JSON``. ``IS 1``
+    makes NULL ``metadata``, corrupt JSON, ``'{}'``, arrays, a non-object
+    ``wardline`` value and missing/unknown kinds all read as defect-side
+    (FIL-1); only a known non-defect kind is excluded.
+    """
+    col = f"{alias}.metadata" if alias else "metadata"
+    kinds = ", ".join(f"'{k}'" for k in sorted(NON_DEFECT_WARDLINE_FINDING_KINDS))
+    return f"NOT (CASE WHEN json_valid({col}) THEN json_extract({col}, '$.wardline.kind') IN ({kinds}) ELSE 0 END IS 1)"
+
+
 def _wardline_finding_kind(finding: Mapping[str, Any]) -> str:
     """The wardline kind of an incoming finding, classified like the stored side.
 
@@ -1625,9 +1644,9 @@ class FilesMixin(DBMixinProtocol):
         # current ``accept_kinds``. A defects-only producer leaves every
         # previously-ingested telemetry fingerprint out of its batch; without
         # this guard each one would flip to ``unseen_in_latest`` and its linked
-        # issue would cascade-close as fixed. ``COALESCE`` keeps a NULL
-        # ``metadata`` row (``json_valid(NULL)`` is NULL) on the defect side.
-        defect_side = f"AND NOT COALESCE({_wardline_non_defect_kind_sql()}, 0)"
+        # issue would cascade-close as fixed. NULL / corrupt / ``'{}'``
+        # metadata stays on the defect side (sweepable) -- see the helper.
+        defect_side = f"AND {_wardline_defect_side_sql()}"
         for fid, fids in seen_finding_ids.items():
             not_in_clause = ""
             extra_params: list[Any] = []
@@ -2428,6 +2447,11 @@ class FilesMixin(DBMixinProtocol):
         clauses = [
             "status = 'unseen_in_latest'",
             "coalesce(last_seen_at, updated_at) < ?",
+            # Stage 0: ageing to ``fixed`` is an absence-driven transition, so it
+            # never touches a stored telemetry row (e.g. ``metric`` rows a 3.3
+            # sweep already left in ``unseen_in_latest``) -- nor, via the
+            # post-commit cascade, closes its linked issue.
+            _wardline_defect_side_sql(),
         ]
         params: list[Any] = [cutoff]
 
@@ -2464,7 +2488,8 @@ class FilesMixin(DBMixinProtocol):
         """Move ``unseen_in_latest`` findings older than *days* to ``fixed``.
 
         Only affects findings whose ``last_seen_at`` (or ``updated_at`` as
-        fallback) is older than the cutoff. After the sweep commits, any fixed
+        fallback) is older than the cutoff. Stored non-defect (wardline
+        telemetry) rows are never aged to ``fixed`` (Stage 0). After the sweep commits, any fixed
         finding linked to a still-open issue cascade-closes that issue (the
         finding→issue cascade); each close runs in its own transaction and is
         best-effort, so a forbidden workflow transition is logged rather than

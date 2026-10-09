@@ -213,15 +213,27 @@ class TestSweepSkipsNonDefectRows:
                 _finding("src/a.py", "R-GONE", fingerprint="fp-gone"),
                 _finding("src/a.py", "R-NOMETA", kind=None, fingerprint="fp-nometa"),
                 _finding("src/a.py", "R-STAYS", fingerprint="fp-stays"),
+                # Stored as ``'{}'`` -- the column default (no metadata supplied).
+                _finding("src/a.py", "R-EMPTY", kind=None, fingerprint="fp-empty"),
+                _finding("src/a.py", "R-CORRUPT", fingerprint="fp-corrupt"),
+                _finding("src/a.py", "R-ARRAY", fingerprint="fp-array"),
+                _finding("src/a.py", "R-WLSTR", fingerprint="fp-wlstr"),
+                _finding("src/a.py", "R-UNKNOWN", kind="frobnicate", fingerprint="fp-unknown"),
             ],
         )
-        fact_id, metric_id, gone_id, nometa_id, stays_id = seeded["new_finding_ids"]
+        fact_id, metric_id, gone_id, nometa_id, stays_id, *defect_side_ids = seeded["new_finding_ids"]
+        empty_id, corrupt_id, array_id, wlstr_id, _unknown_id = defect_side_ids
+        assert db.conn.execute("SELECT metadata FROM scan_findings WHERE id = ?", (empty_id,)).fetchone()[0] == "{}"
         # An issue-linked telemetry row: the close-on-fixed cascade must not fire for it.
         issue = db.create_issue("Tracked telemetry", priority=2)
         issue_status_before = issue.status
         # A legacy/third-party row whose metadata column is NULL must stay sweepable
         # (``json_valid(NULL)`` is NULL — the guard must not read that as "telemetry").
         db.conn.execute("UPDATE scan_findings SET metadata = NULL WHERE id = ?", (nometa_id,))
+        # Off-contract stored metadata must classify defect-side AND not crash the
+        # sweep (``json_extract`` on corrupt text raises unless it is guarded).
+        for finding_id, raw in ((corrupt_id, "{not json"), (array_id, "[1, 2]"), (wlstr_id, '{"wardline": "x"}')):
+            db.conn.execute("UPDATE scan_findings SET metadata = ? WHERE id = ?", (raw, finding_id))
         db.conn.execute("UPDATE scan_findings SET issue_id = ? WHERE id = ?", (issue.id, metric_id))
         db.conn.commit()
 
@@ -240,6 +252,8 @@ class TestSweepSkipsNonDefectRows:
         # Positive controls: defect-side rows absent from the batch are still swept.
         assert _status(db, gone_id) == "unseen_in_latest"
         assert _status(db, nometa_id) == "unseen_in_latest"
+        for finding_id in defect_side_ids:
+            assert _status(db, finding_id) == "unseen_in_latest"
         assert _status(db, stays_id) == "open"
 
     def test_sweep_guard_holds_under_star(self, db: FiligreeDB) -> None:
@@ -275,3 +289,46 @@ def test_config_file_shape_is_documented_key(tmp_path: Path) -> None:
     """The setting lives under ``scan_ingest.accept_kinds`` in config.json (no schema change)."""
     set_scan_ingest_accept_kinds(tmp_path, ["*"])
     assert json.loads((tmp_path / "config.json").read_text()) == {"scan_ingest": {"accept_kinds": ["*"]}}
+
+
+class TestCleanStaleSkipsNonDefectRows:
+    """Stage 0 ruling: no absence-driven path moves a stored telemetry row to ``fixed``.
+
+    ``clean_stale_findings`` ages ``unseen_in_latest`` rows to ``fixed`` and then
+    cascade-closes linked issues. Telemetry rows a 3.3 sweep already left in
+    ``unseen_in_latest`` must not be aged to ``fixed`` (nor their issues closed).
+    """
+
+    def test_clean_stale_skips_non_defect_rows(self, db: FiligreeDB) -> None:
+        set_scan_ingest_accept_kinds(db, ["*"])
+        seeded = db.process_scan_results(
+            scan_source="wardline",
+            findings=[
+                _finding("src/a.py", "R-METRIC", kind="metric", fingerprint="fp-metric"),
+                _finding("src/a.py", "R-DEFECT", fingerprint="fp-defect"),
+                _finding("src/a.py", "R-CORRUPT", fingerprint="fp-corrupt"),
+            ],
+        )
+        metric_id, defect_id, corrupt_id = seeded["new_finding_ids"]
+        metric_issue = db.create_issue("Tracked telemetry", priority=2)
+        metric_issue_status = metric_issue.status
+        defect_issue = db.create_issue("Tracked defect", type="bug", priority=2)
+        old = "2020-01-01T00:00:00+00:00"
+        db.conn.execute(
+            "UPDATE scan_findings SET status = 'unseen_in_latest', last_seen_at = ?, updated_at = ? WHERE id IN (?, ?, ?)",
+            (old, old, metric_id, defect_id, corrupt_id),
+        )
+        db.conn.execute("UPDATE scan_findings SET metadata = '{not json' WHERE id = ?", (corrupt_id,))
+        db.conn.execute("UPDATE scan_findings SET issue_id = ? WHERE id = ?", (metric_issue.id, metric_id))
+        db.conn.execute("UPDATE scan_findings SET issue_id = ? WHERE id = ?", (defect_issue.id, defect_id))
+        db.conn.commit()
+
+        result = db.clean_stale_findings(days=30)
+
+        assert _status(db, metric_id) == "unseen_in_latest"
+        assert db.get_issue(metric_issue.id).status == metric_issue_status
+        # Positive controls: defect-side rows (incl. corrupt metadata) still age out.
+        assert _status(db, defect_id) == "fixed"
+        assert _status(db, corrupt_id) == "fixed"
+        assert result["findings_fixed"] == 2
+        assert result["closed_issue_ids"] == [defect_issue.id]

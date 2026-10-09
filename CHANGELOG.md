@@ -145,8 +145,13 @@ policy (ADR-030) records this as its one pre-4.0 exception.
   still returns 200. A finding with no kind, a malformed kind or an unknown
   kind is treated as a defect and accepted. Independently of the setting, the
   `mark_unseen` sweep never moves a stored telemetry row to
-  `unseen_in_latest`, so a producer that stops emitting telemetry does not
-  close previously stored telemetry rows (or their linked issues) as fixed. Telemetry
+  `unseen_in_latest`, and the clean-stale ageing (`filigree finding
+  clean-stale`, `POST /api/weft/findings/clean-stale`) never moves one from
+  `unseen_in_latest` to `fixed`. So a producer that stops emitting telemetry
+  does not close previously stored telemetry rows (or their linked issues) as
+  fixed, and telemetry rows a 3.3 sweep already left in `unseen_in_latest`
+  stay there. Rows with missing, corrupt or `{}` metadata are still swept and
+  aged as before. Telemetry
   rows that are already stored are left as they are. To restore the 3.3
   behaviour (store every kind, `<engine>` rows included), set
   `"scan_ingest": {"accept_kinds": ["*"]}` in `.weft/filigree/config.json`; a
