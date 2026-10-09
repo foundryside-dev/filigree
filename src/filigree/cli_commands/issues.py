@@ -720,7 +720,10 @@ def update_issue_cmd(
 @click.option(
     "--commit",
     default=None,
-    help="Opaque branch@sha commit anchor (warpline seam); stored verbatim as close_commit.",
+    help=(
+        "Opaque branch@sha commit anchor (warpline seam); stored verbatim as close_commit. "
+        "Warns (never blocks) when the sha is not reachable from origin/<integration_ref>."
+    ),
 )
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.pass_context
@@ -760,6 +763,8 @@ def close(
                     force=force,
                     commit=commit,
                 )
+                # Task 0.6: advisory warnings (closure gate + commit reachability).
+                close_warnings = [*gate.warnings, *issue.close_warnings]
                 if as_json:
                     item: dict[str, Any] = {
                         "issue_id": issue.id,
@@ -770,9 +775,13 @@ def close(
                     }
                     if annotation_warnings:
                         item["annotation_warnings"] = annotation_warnings
+                    if close_warnings:
+                        item["warnings"] = close_warnings
                     succeeded.append(item)
                 else:
                     click.echo(f"Closed {issue.id}: {issue.title}")
+                    for close_warning in close_warnings:
+                        click.echo(f"Warning: {close_warning}", err=True)
                     for warning in annotation_warnings:
                         click.echo(
                             f"Annotation warning: {warning['annotation_id']} must be considered for {warning['file_path']}",

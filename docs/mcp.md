@@ -112,6 +112,10 @@ that blocks it.
 | `issue_id` | string | yes | Issue ID |
 | `include_transitions` | boolean | no | Include valid next states in response |
 
+The response includes `close_commit_reachable`: `true`, `false` or `"unknown"`
+from the reachability check run when the issue was closed with a commit anchor
+(see `issue_close`), or `null` when the issue has no close anchor.
+
 #### `issue_list`
 
 | Parameter | Type | Required | Description |
@@ -175,6 +179,19 @@ the observed holder; mismatches return `CONFLICT` and name both holders.
 | `actor` | string | no | Agent identity for audit trail |
 | `expected_assignee` | string | no | Override expected holder for coordinator writes |
 | `force` | boolean | no | Use the declared reverse/escape edge for cleanup closes |
+| `commit` | string | no | Commit anchor `branch@sha`, stored verbatim as `close_commit` |
+
+When `commit` is given, Filigree checks whether its sha is an ancestor of
+`origin/<integration_ref>` (config key `integration_ref`, default `main`),
+after a bounded `git fetch` in the project root. If it is not (for example, a
+branch that never merged, or a squash-merged branch sha), the issue still
+closes and the response carries
+`warnings: ["commit_not_reachable_from_integration_ref: <sha> not in origin/<ref>"]`.
+If git cannot answer (no checkout, git missing, fetch failed, sha unknown to
+git), the verdict is `unknown` and no warning is added. The verdict is stored
+on a `close_commit_checked` event and shown as `close_commit_reachable` on
+`issue_get`.
+`warnings` is omitted when empty.
 
 `force=true` validates against template `reverse_transitions` and emits
 `transition_forced`; normal close validation remains forward-only.
@@ -187,8 +204,9 @@ file anchor, computed `anchor_state`, and suggested follow-up tools.
 Issues with signed entity bindings pass through the closure gate first.
 Legis is retired and is never consulted: when `LEGIS_URL` is set, a governed
 close with fresh bindings proceeds, a `governance_warning` event
-(`governance_provider_archived: ...`) is recorded on the issue, and the server
-logs a warning; the response envelope itself is unchanged. A drifted binding (the bound content changed since it
+(`governance_provider_archived: ...`) is recorded on the issue, the server
+logs a warning, and the same text is returned in the close response's
+`warnings[]`. A drifted binding (the bound content changed since it
 was signed or attached) is a non-PROCEED verdict and comes back as an error
 envelope whose `error` is the gate reason, `code: CONFLICT`. The same
 mapping applies per item in `issue_batch_close` and to a closing status write

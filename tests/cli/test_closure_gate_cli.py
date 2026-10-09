@@ -9,6 +9,7 @@ governed by attaching a signed entity-association directly on the DB.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -61,6 +62,18 @@ def test_cli_close_governed_proceeds_with_warning_event(cli_in_project: tuple[Cl
     assert result.exit_code == 0
     assert "Closed" in result.output
     assert _warning_events(project, issue_id) == [ARCHIVED_WARNING]
+
+
+def test_cli_close_json_carries_archived_warning(cli_in_project: tuple[CliRunner, Path], monkeypatch: pytest.MonkeyPatch) -> None:
+    # Task 0.6: the archived-provider warning rides on ``close --json`` items.
+    runner, project = cli_in_project
+    issue_id = _extract_id(runner.invoke(cli, ["create", "Governed"]).output)
+    _make_governed(project, issue_id)
+    governance_on(monkeypatch)
+    result = runner.invoke(cli, ["close", issue_id, "--json"])
+    assert result.exit_code == 0, result.output
+    [item] = json.loads(result.output)["succeeded"]
+    assert item["warnings"] == [ARCHIVED_WARNING]
 
 
 def test_cli_close_ungoverned_does_not_call_gate(cli_in_project: tuple[CliRunner, Path], monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1055,10 +1055,11 @@ async def _handle_get_issue(arguments: dict[str, Any]) -> list[TextContent]:
                 ],
             )
             out: dict[str, Any] = dict(result)
-            if include_files:
-                out["files"] = file_assocs
-            return _text(out)
-        out = dict(issue_payload)
+        else:
+            out = dict(issue_payload)
+        # Task 0.6: verdict of the close-time commit reachability check
+        # (true / false / "unknown"); null without a close anchor.
+        out["close_commit_reachable"] = tracker.get_close_commit_reachable(issue)
         if include_files:
             out["files"] = file_assocs
         return _text(out)
@@ -1299,6 +1300,10 @@ async def _handle_close_issue(arguments: dict[str, Any]) -> list[TextContent]:
         result: dict[str, Any] = dict(issue_to_public(issue))
         if annotation_warnings:
             result["annotation_warnings"] = annotation_warnings
+        # Task 0.6: advisory warnings (closure gate + commit reachability), omitted when empty.
+        close_warnings = [*gate.warnings, *issue.close_warnings]
+        if close_warnings:
+            result["warnings"] = close_warnings
         if newly_unblocked:
             result["newly_unblocked"] = [_slim_issue(i) for i in newly_unblocked]
         return _text(result)

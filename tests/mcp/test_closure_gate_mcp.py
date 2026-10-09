@@ -53,6 +53,8 @@ async def test_mcp_close_governed_proceeds_with_warning_event(mcp_db: FiligreeDB
     assert result.get("code") != ErrorCode.CONFLICT
     assert result["issue_id"] == issue.id
     assert _warning_events(mcp_db, issue.id) == [ARCHIVED_WARNING]
+    # Task 0.6: the archived-provider warning now rides on the response too.
+    assert result["warnings"] == [ARCHIVED_WARNING]
 
 
 async def test_mcp_close_ungoverned_does_not_call_gate(mcp_db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:

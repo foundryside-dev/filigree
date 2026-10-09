@@ -15,6 +15,8 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 
+from filigree import commit_reachability
+from filigree.commit_reachability import ReachabilityCheck
 from filigree.db_base import (
     AGE_BUCKETS,
     DBMixinProtocol,
@@ -830,6 +832,7 @@ class IssuesMixin(DBMixinProtocol):
         mode: TransitionMode = TransitionMode.FORWARD,
         claim_commit: str | None = None,
         close_commit: str | None = None,
+        _close_commit_check: ReachabilityCheck | None = None,
         _skip_begin: bool = False,
     ) -> Issue:
         """Update issue fields, workflow status, assignment, and parent links.
@@ -872,6 +875,11 @@ class IssuesMixin(DBMixinProtocol):
                 otherwise. Filigree never parses it.
             close_commit: Opaque ``branch@sha`` commit anchor stored verbatim
                 wherever ``closed_at`` is set (done-entry); NULL otherwise.
+            _close_commit_check: Private (``close_issue`` only). The
+                reachability verdict for ``close_commit``, computed by the
+                caller *outside* the write lock; recorded as a
+                ``close_commit_checked`` event in this transaction when the
+                write enters a done state with a commit anchor.
 
         Returns:
             The freshly loaded issue. Soft transition data warnings are also
@@ -1065,6 +1073,18 @@ class IssuesMixin(DBMixinProtocol):
                 # (NULL when none supplied -> warpline falls back to the timestamp).
                 updates.append("close_commit = ?")
                 params.append(close_commit)
+                if close_commit is not None and _close_commit_check is not None:
+                    # Task 0.6: the reachability verdict rides on the close as
+                    # its own non-reversible event (no DDL): new_value is
+                    # true/false/unknown, old_value the anchor as stored.
+                    self._record_event(
+                        issue_id,
+                        "close_commit_checked",
+                        actor=actor,
+                        old_value=close_commit,
+                        new_value=_close_commit_check.stored_value,
+                        comment=f"{_close_commit_check.sha or '-'} vs {_close_commit_check.ref}",
+                    )
             else:
                 # Clear closed_at when leaving a done-category state
                 old_cat = self.templates.get_category(current.type, current.status)
@@ -1242,9 +1262,16 @@ class IssuesMixin(DBMixinProtocol):
         just because that's the only reachable done-state).
 
         ``commit`` is an opaque ``branch@sha`` commit anchor (warpline seam,
-        contract B) persisted as ``close_commit`` when the issue enters the
-        done-category state; NULL when omitted. Filigree stores it verbatim and
-        never parses it.
+        contract B) persisted verbatim as ``close_commit`` when the issue enters
+        the done-category state; NULL when omitted.
+
+        When ``commit`` is given, the sha after its last ``@`` is checked against
+        ``origin/<integration_ref>`` (config.json ``integration_ref``, default
+        ``main``) before the write lock is taken -- see
+        :mod:`filigree.commit_reachability`. The verdict is stored as a
+        ``close_commit_checked`` event; a definite "not reachable" adds a
+        ``commit_not_reachable_from_integration_ref`` entry to the returned
+        issue's transient ``close_warnings``. The check never blocks the close.
         """
         if fields is not None and not isinstance(fields, dict):
             msg = "fields must be a dict"
@@ -1285,8 +1312,14 @@ class IssuesMixin(DBMixinProtocol):
         if reason:
             update_fields["close_reason"] = reason
 
+        check: ReachabilityCheck | None = None
+        if commit is not None:
+            from filigree.core import read_integration_ref
+
+            check = commit_reachability.check_commit_reachable(self.project_root, commit, read_integration_ref(self.meta_dir))
+
         mode = TransitionMode.BACKWARD if force else TransitionMode.FORWARD
-        return self.update_issue(
+        closed = self.update_issue(
             issue_id,
             status=done_status,
             fields=update_fields or None,
@@ -1294,8 +1327,12 @@ class IssuesMixin(DBMixinProtocol):
             expected_assignee=expected_assignee,
             mode=mode,
             close_commit=commit,
+            _close_commit_check=check,
             _skip_begin=_skip_begin,
         )
+        if check is not None and check.warning is not None:
+            closed.close_warnings.append(check.warning)
+        return closed
 
     @_retry_busy()
     @_in_immediate_tx("reopen_issue")

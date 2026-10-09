@@ -14,6 +14,7 @@ import click
 
 from filigree.cli_commands.files import finding_group
 from filigree.cli_common import _emit_registry_startup_failure, add_hidden_flat_alias, get_db, refresh_summary
+from filigree.commit_reachability import is_safe_ref
 from filigree.core import (
     CONF_FILENAME,
     CONFIG_FILENAME,
@@ -1298,25 +1299,35 @@ def config_group() -> None:
 @click.argument("key")
 @click.argument("value")
 def config_set(key: str, value: str) -> None:
-    """Set a project config key. Only ``population`` is settable today.
+    """Set a project config key. Settable: ``population``, ``integration_ref``.
 
     \b
     filigree config set population suite-construction
     filigree config set population product-use
+    filigree config set integration_ref main
     """
-    if key != "population":
-        raise click.UsageError(f"Unsupported config key {key!r}. Settable keys: population")
-    if value not in VALID_POPULATIONS:
-        raise click.UsageError(f"Invalid population {value!r}. Valid values: {', '.join(VALID_POPULATIONS)}")
+    if key == "population":
+        if value not in VALID_POPULATIONS:
+            raise click.UsageError(f"Invalid population {value!r}. Valid values: {', '.join(VALID_POPULATIONS)}")
+    elif key == "integration_ref":
+        # The branch close-time commit anchors are checked against, as
+        # origin/<integration_ref> (Task 0.6). Reaches git as an argv element.
+        if not is_safe_ref(value):
+            raise click.UsageError(f"Invalid integration_ref {value!r}: not a safe git branch name")
+    else:
+        raise click.UsageError(f"Unsupported config key {key!r}. Settable keys: population, integration_ref")
     try:
         store_dir = find_filigree_anchor().store_dir
     except ProjectNotInitialisedError as exc:
         click.echo(str(exc), err=True)
         sys.exit(1)
     config = _read_project_config_or_exit(store_dir)
-    config["population"] = value
+    if key == "population":
+        config["population"] = value
+    else:
+        config["integration_ref"] = value
     write_config(store_dir, config)
-    click.echo(f"population = {value}")
+    click.echo(f"{key} = {value}")
 
 
 def register(cli: click.Group) -> None:

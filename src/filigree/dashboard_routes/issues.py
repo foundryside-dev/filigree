@@ -654,6 +654,10 @@ def create_classic_router() -> APIRouter:
         result: dict[str, Any] = dict(issue.to_dict())
         if annotation_warnings:
             result["annotation_warnings"] = annotation_warnings
+        # Task 0.6: advisory warnings (closure gate + commit reachability), omitted when empty.
+        close_warnings = [*gate.warnings, *issue.close_warnings]
+        if close_warnings:
+            result["warnings"] = close_warnings
         return JSONResponse(result)
 
     @router.post("/issue/{issue_id}/reopen")
@@ -1511,6 +1515,10 @@ def create_weft_router() -> APIRouter:
         result: dict[str, Any] = dict(issue_to_weft(issue))
         if annotation_warnings:
             result["annotation_warnings"] = annotation_warnings
+        # Task 0.6: advisory warnings (closure gate + commit reachability), omitted when empty.
+        close_warnings = [*gate.warnings, *issue.close_warnings]
+        if close_warnings:
+            result["warnings"] = close_warnings
         if newly_unblocked:
             result["newly_unblocked"] = [slim_issue_to_weft(i) for i in newly_unblocked]
         return JSONResponse(result)

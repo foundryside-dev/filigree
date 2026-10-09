@@ -11,7 +11,9 @@ import json
 import sqlite3
 from datetime import UTC, datetime, timedelta
 
+from filigree.commit_reachability import Reachable, parse_stored_value
 from filigree.db_base import DBMixinProtocol, _in_immediate_tx, _now_iso, _retry_busy
+from filigree.models import Issue
 from filigree.types.api import UndoConflictError
 from filigree.types.events import REVERSIBLE_EVENT_TYPES, EventRecord, EventRecordWithTitle, EventType, UndoResult
 
@@ -318,6 +320,22 @@ class EventsMixin(DBMixinProtocol):
             (issue_id, limit, offset),
         ).fetchall()
         return [self._build_event_record(r) for r in rows]
+
+    def get_close_commit_reachable(self, issue: Issue) -> Reachable | None:
+        """Return the stored reachability verdict for *issue*'s ``close_commit``.
+
+        ``True`` / ``False`` / ``"unknown"`` from the newest ``close_commit_checked``
+        event for the anchor currently stored (Task 0.6); ``None`` when the issue
+        carries no close anchor or it predates the check.
+        """
+        if issue.close_commit is None:
+            return None
+        row = self.conn.execute(
+            "SELECT new_value FROM events WHERE issue_id = ? AND event_type = 'close_commit_checked' AND old_value = ? "
+            "ORDER BY created_at DESC, id DESC LIMIT 1",
+            (issue.id, issue.close_commit),
+        ).fetchone()
+        return parse_stored_value(row["new_value"]) if row is not None else None
 
     def _undo_candidate_row(self, issue_id: str) -> sqlite3.Row | None:
         """Return the event ``undo_last`` would reverse next, or None.

@@ -21,6 +21,7 @@ import tomllib
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast, get_args
 
+from filigree.commit_reachability import DEFAULT_INTEGRATION_REF
 from filigree.db_annotations import (
     VALID_ANNOTATION_INTENTS,
     VALID_ANNOTATION_RELATIONSHIPS,
@@ -1441,6 +1442,23 @@ def read_population(filigree_dir: Path) -> str | None:
     except (ValueError, TypeError, OSError):
         return None
     return value if isinstance(value, str) and value in VALID_POPULATIONS else None
+
+
+def read_integration_ref(filigree_dir: Path) -> str:
+    """Return the configured ``integration_ref`` (default ``main``).
+
+    Stored as the ``integration_ref`` key in config.json (no schema change, Task
+    0.6): the branch a close's commit anchor is checked against as
+    ``origin/<integration_ref>``. Never raises; an absent, corrupt or non-string
+    setting yields the default. An unsafe ref name is returned as-is so the
+    reachability check reports ``unknown`` (it validates before running git)
+    rather than silently checking against the wrong branch.
+    """
+    try:
+        value = read_config(filigree_dir).get("integration_ref")
+    except (ValueError, TypeError, OSError):
+        return DEFAULT_INTEGRATION_REF
+    return value if isinstance(value, str) and value else DEFAULT_INTEGRATION_REF
 
 
 # Stage 0 telemetry cut (Task 0.5a): which ``metadata.wardline.kind`` values the

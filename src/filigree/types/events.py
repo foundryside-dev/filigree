@@ -30,6 +30,7 @@ EventType = Literal[
     "transition_warning",
     "transition_forced",
     "governance_warning",
+    "close_commit_checked",
     "entity_association_added",
     "entity_association_refreshed",
     "entity_association_removed",
@@ -93,6 +94,7 @@ def is_reversible_event_type(event_type: EventType) -> bool:
             | "transition_warning"
             | "transition_forced"
             | "governance_warning"
+            | "close_commit_checked"
             | "entity_association_added"
             | "entity_association_refreshed"
             | "entity_association_removed"

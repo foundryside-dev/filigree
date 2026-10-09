@@ -154,6 +154,7 @@ class ProjectConfig(_ProjectConfigRequired, total=False):
     loomweave: LoomweaveConfig
     population: str
     scan_ingest: ScanIngestConfig
+    integration_ref: str
 
 
 _T = TypeVar("_T")

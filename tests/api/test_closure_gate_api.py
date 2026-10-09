@@ -14,7 +14,7 @@ from __future__ import annotations
 import pytest
 from httpx import AsyncClient
 
-from filigree import governance, legis_client
+from filigree import commit_reachability, governance, legis_client
 from filigree.types.api import ErrorCode
 from tests._fakes.legis_retired import ARCHIVED_WARNING, governance_on
 from tests.conftest import PopulatedDB
@@ -56,6 +56,23 @@ class TestClosureGateSingleClose:
         resp = await client.post(f"/api/issue/{issue_id}/close", json={"actor": "x"})
         assert resp.status_code == 200, resp.text
         assert _warning_events(dashboard_db, issue_id) == [ARCHIVED_WARNING]
+        # Task 0.6: the archived-provider warning now rides on the response too.
+        assert resp.json()["warnings"] == [ARCHIVED_WARNING]
+
+    async def test_weft_single_close_governed_carries_archived_warning(
+        self, client: AsyncClient, dashboard_db: PopulatedDB, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        issue_id = dashboard_db.ids["a"]
+        _make_governed(dashboard_db, issue_id)
+        governance_on(monkeypatch)
+        resp = await client.post(f"/api/weft/issues/{issue_id}/close", json={"actor": "x"})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["warnings"] == [ARCHIVED_WARNING]
+
+    async def test_ungoverned_close_omits_warnings(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        resp = await client.post(f"/api/issue/{dashboard_db.ids['a']}/close", json={"actor": "x"})
+        assert resp.status_code == 200, resp.text
+        assert "warnings" not in resp.json()  # omitted when empty
 
     async def test_ungoverned_closes_without_calling_gate(
         self, client: AsyncClient, dashboard_db: PopulatedDB, monkeypatch: pytest.MonkeyPatch
@@ -268,3 +285,37 @@ class TestBatchCloseDoesNotWedge:
         assert {i["id"] for i in body["closed"]} == set(ids)
         assert body["errors"] == []
         assert elapsed < 1.0, f"batch close of 10 governed issues took {elapsed:.2f}s"
+
+
+def _stub_unreachable(monkeypatch: pytest.MonkeyPatch) -> str:
+    """Make every reachability check report the anchor as unreachable; return the warning text."""
+    result = commit_reachability.ReachabilityCheck(reachable=False, sha="abc1234", ref="origin/main")
+    monkeypatch.setattr(commit_reachability, "check_commit_reachable", lambda *_a, **_k: result)
+    assert result.warning is not None
+    return result.warning
+
+
+class TestCloseWarningsCombined:
+    """Task 0.6: the governance warning and the reachability warning share one ``warnings[]``."""
+
+    async def test_classic_close_carries_both_warnings(
+        self, client: AsyncClient, dashboard_db: PopulatedDB, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        issue_id = dashboard_db.ids["a"]
+        _make_governed(dashboard_db, issue_id)
+        governance_on(monkeypatch)
+        unreachable = _stub_unreachable(monkeypatch)
+        resp = await client.post(f"/api/issue/{issue_id}/close", json={"actor": "x", "commit": "side@abc1234"})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["warnings"] == [ARCHIVED_WARNING, unreachable]
+
+    async def test_weft_close_carries_both_warnings(
+        self, client: AsyncClient, dashboard_db: PopulatedDB, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        issue_id = dashboard_db.ids["a"]
+        _make_governed(dashboard_db, issue_id)
+        governance_on(monkeypatch)
+        unreachable = _stub_unreachable(monkeypatch)
+        resp = await client.post(f"/api/weft/issues/{issue_id}/close", json={"actor": "x", "commit": "side@abc1234"})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["warnings"] == [ARCHIVED_WARNING, unreachable]
