@@ -158,7 +158,7 @@ export async function openDetail(issueId) {
       (c) =>
         '<div class="rounded p-2 text-xs mb-1" style="background:var(--surface-base)">' +
         `<div style="color:var(--text-secondary)" class="mb-1">${escHtml(c.author || "anonymous")} &middot; ${c.created_at ? c.created_at.slice(0, 16) : ""}</div>` +
-        `<div style="color:var(--text-primary)">${escHtml(c.text)}</div></div>`,
+        `<div class="leading-relaxed whitespace-pre-wrap" style="color:var(--text-primary)">${escHtml(c.text)}</div></div>`,
     )
     .join("");
   const issueFilesHtml = issueFilesData
